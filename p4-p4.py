@@ -1964,6 +1964,7 @@ class P4Sync(Command, P4UserMap):
         self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
+        raise NotImplementedError( "Pull in source information so integrate is done correctly" )
         files = []
         fnum = 0
         while commit.has_key("depotFile%s" % fnum):
@@ -1997,52 +1998,8 @@ class P4Sync(Command, P4UserMap):
         path = wildcard_decode(path)
         return path
 
-    def splitFilesIntoBranches(self, commit):
-        """Look at each depotFile in the commit to figure out to what
-           branch it belongs."""
-
-        if self.clientSpecDirs:
-            files = self.extractFilesFromCommit(commit)
-            self.clientSpecDirs.update_client_spec_path_cache(files)
-
-        branches = {}
-        fnum = 0
-        while commit.has_key("depotFile%s" % fnum):
-            path =  commit["depotFile%s" % fnum]
-            found = [p for p in self.depotPaths
-                     if p4PathStartsWith(path, p)]
-            if not found:
-                fnum = fnum + 1
-                continue
-
-            file = {}
-            file["path"] = path
-            file["rev"] = commit["rev%s" % fnum]
-            file["action"] = commit["action%s" % fnum]
-            file["type"] = commit["type%s" % fnum]
-            fnum = fnum + 1
-
-            # start with the full relative path where this file would
-            # go in a p4 client
-            if self.clientSpec:
-                relPath = self.clientSpecDirs.map_in_client(path)
-            else:
-                relPath = self.stripRepoPath(path, self.depotPaths)
-
-            for branch in self.knownBranches.keys():
-                # add a trailing slash so that a commit into qt/4.2foo
-                # doesn't end up in qt/4.2, e.g.
-                if relPath.startswith(branch + "/"):
-                    if branch not in branches:
-                        branches[branch] = []
-                    branches[branch].append(file)
-                    break
-
-        return branches
-
     # output one file from the P4 stream
     # - helper for streamP4Files
-
     def streamOneP4File(self, file, contents):
         raise NotImplementedError( "Adapt to Perforce" )
         relPath = self.stripRepoPath(file['depotFile'], self.branchPrefixes)
