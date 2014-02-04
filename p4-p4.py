@@ -1036,7 +1036,6 @@ class P4Submit(Command, P4UserMap):
                 optparse.make_option("--prepare-p4-only", dest="prepare_p4_only", action="store_true"),
                 optparse.make_option("--conflict", dest="conflict_behavior",
                                      choices=self.conflict_behavior_choices),
-                optparse.make_option("--branch", dest="branch"),
         ]
         self.description = "Submit changes from git to the perforce depot."
         self.usage += " [name of git branch to submit into perforce depot]"
@@ -1049,7 +1048,6 @@ class P4Submit(Command, P4UserMap):
         self.isWindows = (platform.system() == "Windows")
         self.exportLabels = False
         self.p4HasMoveCommand = p4_has_move_command()
-        self.branch = None
 
     def check(self):
         if len(p4CmdList("opened ...")) > 0:
@@ -1801,8 +1799,6 @@ class P4Submit(Command, P4UserMap):
             print "All commits applied!"
 
             sync = P4Sync()
-            if self.branch:
-                sync.branch = self.branch
             sync.run([])
 
             rebase = P4Rebase()
@@ -1944,7 +1940,6 @@ class P4Sync(Command, P4UserMap):
         Command.__init__(self)
         P4UserMap.__init__(self)
         self.options = [
-                optparse.make_option("--branch", dest="branch"),
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--detect-labels", dest="detectLabels", action="store_true"),
@@ -1969,7 +1964,6 @@ class P4Sync(Command, P4UserMap):
         self.silent = False
         self.createdBranches = set()
         self.committedChanges = set()
-        self.branch = ""
         self.detectLabels = False
         self.importLabels = False
         self.changesFile = ""
@@ -2312,6 +2306,7 @@ class P4Sync(Command, P4UserMap):
 
     def commit(self, details, files, branch, parent = ""):
         raise NotImplementedError( "Adapt to Perforce" )
+        assert branch is None # TODO remove this arg
         epoch = details["time"]
         author = details["user"]
 
@@ -2674,7 +2669,7 @@ class P4Sync(Command, P4UserMap):
 
             try:
                 files = self.extractFilesFromCommit(description)
-                self.commit(description, files, self.branch,
+                self.commit(description, files, None,
                             self.initialParent)
                 # only needed once, to connect to the previous commit
                 self.initialParent = ""
@@ -2684,7 +2679,7 @@ class P4Sync(Command, P4UserMap):
 
     def importHeadRevision(self, revision):
         raise NotImplementedError( "Adapt to Perforce" )
-        print "Doing initial import of %s from revision %s into %s" % (' '.join(self.depotPaths), revision, self.branch)
+        print "Doing initial import of %s from revision %s" % (' '.join(self.depotPaths), revision)
 
         details = {}
         details["user"] = "git perforce import user"
@@ -2734,7 +2729,7 @@ class P4Sync(Command, P4UserMap):
 
         self.updateOptionDict(details)
         try:
-            self.commit(details, self.extractFilesFromCommit(details), self.branch)
+            self.commit(details, self.extractFilesFromCommit(details))
         except IOError:
             print "IO error with git fast-import. Is your git version recent enough?"
             print self.gitError.read()
@@ -2763,13 +2758,6 @@ class P4Sync(Command, P4UserMap):
                     print 'Syncing with origin first, using "git fetch origin"'
                 system("git fetch origin")
 
-        branch_arg_given = bool(self.branch)
-        if len(self.branch) == 0:
-            self.branch = self.refPrefix + "master"
-            if gitBranchExists("refs/heads/p4") and self.importIntoRemotes:
-                system("git update-ref %s refs/heads/p4" % self.branch)
-                system("git branch -D p4")
-
         # accept either the command-line option, or the configuration variable
         if self.useClientSpec:
             # will use this after clone to set the variable
@@ -2790,12 +2778,7 @@ class P4Sync(Command, P4UserMap):
             branches = p4BranchesInGit(self.importIntoRemotes)
 
             # restrict to just this one, disabling detect-branches
-            if branch_arg_given:
-                short = self.branch.split("/")[-1]
-                if short in branches:
-                    self.p4BranchesInGit = [ short ]
-            else:
-                self.p4BranchesInGit = branches.keys()
+            self.p4BranchesInGit = branches.keys()
 
             if len(self.p4BranchesInGit) > 1:
                 if not self.silent:
@@ -2840,20 +2823,7 @@ class P4Sync(Command, P4UserMap):
                 self.depotPaths = sorted(self.previousDepotPaths)
                 self.changeRange = "@%s,#head" % p4Change
                 if not self.silent:
-                    print "Performing incremental import into %s git branch" % self.branch
-
-        # accept multiple ref name abbreviations:
-        #    refs/foo/bar/branch -> use it exactly
-        #    p4/branch -> prepend refs/remotes/ or refs/heads/
-        #    branch -> prepend refs/remotes/p4/ or refs/heads/p4/
-        if not self.branch.startswith("refs/"):
-            if self.importIntoRemotes:
-                prepend = "refs/remotes/"
-            else:
-                prepend = "refs/heads/"
-            if not self.branch.startswith("p4/"):
-                prepend += "p4/"
-            self.branch = prepend + self.branch
+                    print "Performing incremental import"
 
         if len(args) == 0 and self.depotPaths:
             if not self.silent:
@@ -2950,16 +2920,6 @@ class P4Sync(Command, P4UserMap):
                     if not self.p4BranchesInGit:
                         die("No remote p4 branches.  Perhaps you never did \"git p4 clone\" in here.")
 
-                    # The default branch is master, unless --branch is used to
-                    # specify something else.  Make sure it exists, or complain
-                    # nicely about how to use --branch.
-                    if not branch_exists(self.branch):
-                        if branch_arg_given:
-                            die("Error: branch %s does not exist." % self.branch)
-                        else:
-                            die("Error: no branch %s; perhaps specify one with --branch." %
-                                self.branch)
-
                 if self.verbose:
                     print "Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
                                                               self.changeRange)
@@ -2972,9 +2932,6 @@ class P4Sync(Command, P4UserMap):
                 if not self.silent:
                     print "No changes to import!"
             else:
-                if not self.silent:
-                    print "Import destination: %s" % self.branch
-
                 self.updatedBranches = set()
 
                 if args:
@@ -3015,13 +2972,6 @@ class P4Sync(Command, P4UserMap):
             for branch in self.tempBranches:
                 read_pipe("git update-ref -d %s" % branch)
             os.rmdir(os.path.join(os.environ.get("GIT_DIR", ".git"), self.tempBranchLocation))
-
-        # Create a symbolic ref p4/HEAD pointing to p4/<branch> to allow
-        # a convenient shortcut refname "p4".
-        if self.importIntoRemotes:
-            head_ref = self.refPrefix + "HEAD"
-            if not gitBranchExists(head_ref) and gitBranchExists(self.branch):
-                system(["git", "symbolic-ref", head_ref, self.branch])
 
         return True
 
@@ -3137,15 +3087,6 @@ class P4Clone(P4Sync):
 
         if not P4Sync.run(self, depotPaths):
             return False
-
-        # create a master branch and check out a work tree
-        if gitBranchExists(self.branch):
-            system([ "git", "branch", "master", self.branch ])
-            if not self.cloneBare:
-                system([ "git", "checkout", "-f" ])
-        else:
-            print 'Not checking out any branch, use ' \
-                  '"git checkout -q -b master <branch>"'
 
         # auto-set this variable if invoked with --use-client-spec
         if self.useClientSpec_from_options:
