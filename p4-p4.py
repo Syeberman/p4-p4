@@ -1963,7 +1963,6 @@ class P4Sync(Command, P4UserMap):
         self.depotPaths = None
         self.p4BranchesInGit = []
         self.useClientSpec = False
-        self.useClientSpec_from_options = False
         self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
@@ -2638,12 +2637,6 @@ class P4Sync(Command, P4UserMap):
 
         # accept either the command-line option, or the configuration variable
         if self.useClientSpec:
-            # will use this after clone to set the variable
-            self.useClientSpec_from_options = True
-        else:
-            if gitConfigBool("git-p4.useclientspec"):
-                self.useClientSpec = True
-        if self.useClientSpec:
             self.clientSpecDirs = getClientSpec()
 
         # TODO: should always look at previous commits,
@@ -2942,10 +2935,6 @@ class P4Clone(P4Sync):
 
         if not P4Sync.run(self, depotPaths):
             return False
-
-        # auto-set this variable if invoked with --use-client-spec
-        if self.useClientSpec_from_options:
-            system("git config --bool git-p4.useclientspec true")
 
         return True
 
