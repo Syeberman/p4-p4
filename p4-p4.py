@@ -1942,7 +1942,6 @@ class P4Sync(Command, P4UserMap):
         self.options = [
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
-                optparse.make_option("--detect-labels", dest="detectLabels", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--import-local", dest="importIntoRemotes", action="store_false",
                                      help="Import into refs/heads/ , not refs/remotes"),
@@ -1964,7 +1963,6 @@ class P4Sync(Command, P4UserMap):
         self.silent = False
         self.createdBranches = set()
         self.committedChanges = set()
-        self.detectLabels = False
         self.importLabels = False
         self.changesFile = ""
         self.syncWithOrigin = True
@@ -2352,64 +2350,6 @@ class P4Sync(Command, P4UserMap):
         self.gitStream.write("\n")
 
         change = int(details["change"])
-
-        if self.labels.has_key(change):
-            label = self.labels[change]
-            labelDetails = label[0]
-            labelRevisions = label[1]
-            if self.verbose:
-                print "Change %s is labelled %s" % (change, labelDetails)
-
-            files = p4CmdList(["files"] + ["%s...@%s" % (p, change)
-                                                for p in self.branchPrefixes])
-
-            if len(files) == len(labelRevisions):
-
-                cleanedFiles = {}
-                for info in files:
-                    if info["action"] in self.delete_actions:
-                        continue
-                    cleanedFiles[info["depotFile"]] = info["rev"]
-
-                if cleanedFiles == labelRevisions:
-                    self.streamTag(self.gitStream, 'tag_%s' % labelDetails['label'], labelDetails, branch, epoch)
-
-                else:
-                    if not self.silent:
-                        print ("Tag %s does not match with change %s: files do not match."
-                               % (labelDetails["label"], change))
-
-            else:
-                if not self.silent:
-                    print ("Tag %s does not match with change %s: file count is different."
-                           % (labelDetails["label"], change))
-
-    # Build a dictionary of changelists and labels, for "detect-labels" option.
-    def getLabels(self):
-        self.labels = {}
-
-        l = p4CmdList(["labels"] + ["%s..." % p for p in self.depotPaths])
-        if len(l) > 0 and not self.silent:
-            print "Finding files belonging to labels in %s" % `self.depotPaths`
-
-        for output in l:
-            label = output["label"]
-            revisions = {}
-            newestChange = 0
-            if self.verbose:
-                print "Querying files for label %s" % label
-            for file in p4CmdList(["files"] +
-                                      ["%s...@%s" % (p, label)
-                                          for p in self.depotPaths]):
-                revisions[file["depotFile"]] = file["rev"]
-                change = int(file["change"])
-                if change > newestChange:
-                    newestChange = change
-
-            self.labels[newestChange] = [output, revisions]
-
-        if self.verbose:
-            print "Label changes: %s" % self.labels.keys()
 
     # Import p4 labels as git tags. A direct mapping does not
     # exist, so assume that if all the files are at the same revision
@@ -2884,9 +2824,6 @@ class P4Sync(Command, P4UserMap):
         self.branchPrefixes = self.depotPaths
 
         self.loadUserMapFromCache()
-        self.labels = {}
-        if self.detectLabels:
-            self.getLabels();
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
