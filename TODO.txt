@@ -1,0 +1,7 @@
+
+- Pull in any open branchspec that matches one of the imported paths
+-- ...but strip out any paths not imported
+-- I've removed --detect-branches
+
+
+

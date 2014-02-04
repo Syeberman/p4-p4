@@ -959,6 +959,7 @@ class P4Debug(Command):
 
 class P4RollBack(Command):
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         self.options = [
             optparse.make_option("--local", dest="rollbackLocalBranches", action="store_true")
@@ -1022,6 +1023,7 @@ class P4Submit(Command, P4UserMap):
     conflict_behavior_choices = ("ask", "skip", "quit")
 
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         P4UserMap.__init__(self)
         self.options = [
@@ -1938,11 +1940,11 @@ class P4Sync(Command, P4UserMap):
     delete_actions = ( "delete", "move/delete", "purge" )
 
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         P4UserMap.__init__(self)
         self.options = [
                 optparse.make_option("--branch", dest="branch"),
-                optparse.make_option("--detect-branches", dest="detectBranches", action="store_true"),
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--detect-labels", dest="detectLabels", action="store_true"),
@@ -1968,7 +1970,6 @@ class P4Sync(Command, P4UserMap):
         self.createdBranches = set()
         self.committedChanges = set()
         self.branch = ""
-        self.detectBranches = False
         self.detectLabels = False
         self.importLabels = False
         self.changesFile = ""
@@ -2034,10 +2035,6 @@ class P4Sync(Command, P4UserMap):
             # branch detection moves files up a level (the branch name)
             # from what client spec interpretation gives
             path = self.clientSpecDirs.map_in_client(path)
-            if self.detectBranches:
-                for b in self.knownBranches:
-                    if path.startswith(b + "/"):
-                        path = path[len(b)+1:]
 
         elif self.keepRepoPath:
             # Preserve everything in relative path name except leading
@@ -2676,72 +2673,11 @@ class P4Sync(Command, P4UserMap):
             cnt = cnt + 1
 
             try:
-                if self.detectBranches:
-                    branches = self.splitFilesIntoBranches(description)
-                    for branch in branches.keys():
-                        ## HACK  --hwn
-                        branchPrefix = self.depotPaths[0] + branch + "/"
-                        self.branchPrefixes = [ branchPrefix ]
-
-                        parent = ""
-
-                        filesForCommit = branches[branch]
-
-                        if self.verbose:
-                            print "branch is %s" % branch
-
-                        self.updatedBranches.add(branch)
-
-                        if branch not in self.createdBranches:
-                            self.createdBranches.add(branch)
-                            parent = self.knownBranches[branch]
-                            if parent == branch:
-                                parent = ""
-                            else:
-                                fullBranch = self.projectName + branch
-                                if fullBranch not in self.p4BranchesInGit:
-                                    if not self.silent:
-                                        print("\n    Importing new branch %s" % fullBranch);
-                                    if self.importNewBranch(branch, change - 1):
-                                        parent = ""
-                                        self.p4BranchesInGit.append(fullBranch)
-                                    if not self.silent:
-                                        print("\n    Resuming with change %s" % change);
-
-                                if self.verbose:
-                                    print "parent determined through known branches: %s" % parent
-
-                        branch = self.gitRefForBranch(branch)
-                        parent = self.gitRefForBranch(parent)
-
-                        if self.verbose:
-                            print "looking for initial parent for %s; current parent is %s" % (branch, parent)
-
-                        if len(parent) == 0 and branch in self.initialParents:
-                            parent = self.initialParents[branch]
-                            del self.initialParents[branch]
-
-                        blob = None
-                        if len(parent) > 0:
-                            tempBranch = "%s/%d" % (self.tempBranchLocation, change)
-                            if self.verbose:
-                                print "Creating temporary branch: " + tempBranch
-                            self.commit(description, filesForCommit, tempBranch)
-                            self.tempBranches.append(tempBranch)
-                            self.checkpoint()
-                            blob = self.searchParent(parent, branch, tempBranch)
-                        if blob:
-                            self.commit(description, filesForCommit, branch, blob)
-                        else:
-                            if self.verbose:
-                                print "Parent of %s not found. Committing into head of %s" % (branch, parent)
-                            self.commit(description, filesForCommit, branch, parent)
-                else:
-                    files = self.extractFilesFromCommit(description)
-                    self.commit(description, files, self.branch,
-                                self.initialParent)
-                    # only needed once, to connect to the previous commit
-                    self.initialParent = ""
+                files = self.extractFilesFromCommit(description)
+                self.commit(description, files, self.branch,
+                            self.initialParent)
+                # only needed once, to connect to the previous commit
+                self.initialParent = ""
             except IOError:
                 print self.gitError.read()
                 sys.exit(1)
@@ -2864,7 +2800,6 @@ class P4Sync(Command, P4UserMap):
             if len(self.p4BranchesInGit) > 1:
                 if not self.silent:
                     print "Importing from/into multiple branches"
-                self.detectBranches = True
                 for branch in branches.keys():
                     self.initialParents[self.refPrefix + branch] = \
                         branches[branch]
@@ -2904,7 +2839,7 @@ class P4Sync(Command, P4UserMap):
             if p4Change > 0:
                 self.depotPaths = sorted(self.previousDepotPaths)
                 self.changeRange = "@%s,#head" % p4Change
-                if not self.silent and not self.detectBranches:
+                if not self.silent:
                     print "Performing incremental import into %s git branch" % self.branch
 
         # accept multiple ref name abbreviations:
@@ -2983,24 +2918,6 @@ class P4Sync(Command, P4UserMap):
         if self.detectLabels:
             self.getLabels();
 
-        if self.detectBranches:
-            ## FIXME - what's a P4 projectName ?
-            self.projectName = self.guessProjectName()
-
-            if self.hasOrigin:
-                self.getBranchMappingFromGitBranches()
-            else:
-                self.getBranchMapping()
-            if self.verbose:
-                print "p4-git branches: %s" % self.p4BranchesInGit
-                print "initial parents: %s" % self.initialParents
-            for b in self.p4BranchesInGit:
-                if b != "master":
-
-                    ## FIXME
-                    b = b[len(self.projectName):]
-                self.createdBranches.add(b)
-
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
         self.importProcess = subprocess.Popen(["git", "fast-import"],
@@ -3036,13 +2953,12 @@ class P4Sync(Command, P4UserMap):
                     # The default branch is master, unless --branch is used to
                     # specify something else.  Make sure it exists, or complain
                     # nicely about how to use --branch.
-                    if not self.detectBranches:
-                        if not branch_exists(self.branch):
-                            if branch_arg_given:
-                                die("Error: branch %s does not exist." % self.branch)
-                            else:
-                                die("Error: no branch %s; perhaps specify one with --branch." %
-                                    self.branch)
+                    if not branch_exists(self.branch):
+                        if branch_arg_given:
+                            die("Error: branch %s does not exist." % self.branch)
+                        else:
+                            die("Error: no branch %s; perhaps specify one with --branch." %
+                                self.branch)
 
                 if self.verbose:
                     print "Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
@@ -3056,18 +2972,17 @@ class P4Sync(Command, P4UserMap):
                 if not self.silent:
                     print "No changes to import!"
             else:
-                if not self.silent and not self.detectBranches:
+                if not self.silent:
                     print "Import destination: %s" % self.branch
 
                 self.updatedBranches = set()
 
-                if not self.detectBranches:
-                    if args:
-                        # start a new branch
-                        self.initialParent = ""
-                    else:
-                        # build on a previous revision
-                        self.initialParent = parseRevision(self.branch)
+                if args:
+                    # start a new branch
+                    self.initialParent = ""
+                else:
+                    # build on a previous revision
+                    self.initialParent = parseRevision(self.branch)
 
                 self.importChanges(changes)
 
@@ -3112,6 +3027,7 @@ class P4Sync(Command, P4UserMap):
 
 class P4Rebase(Command):
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         self.options = [
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
@@ -3239,6 +3155,7 @@ class P4Clone(P4Sync):
 
 class P4Branches(Command):
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         self.options = [ ]
         self.description = ("Shows the git branches that hold imports and their "
