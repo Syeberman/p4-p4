@@ -650,7 +650,7 @@ def gitConfigList(key):
         _gitConfig[key] = s.strip().split(os.linesep)
     return _gitConfig[key]
 
-def p4BranchesInGit(branchesAreInRemotes=True):
+def p4BranchesInGit():
     """Find all the branches whose names start with "p4/", looking
        in remotes or heads as specified by the argument.  Return
        a dictionary of { branch: revision } for each one found.
@@ -661,10 +661,7 @@ def p4BranchesInGit(branchesAreInRemotes=True):
     branches = {}
 
     cmdline = "git rev-parse --symbolic "
-    if branchesAreInRemotes:
-        cmdline += "--remotes"
-    else:
-        cmdline += "--branches"
+    cmdline += "--remotes"
 
     for line in read_pipe_lines(cmdline):
         line = line.strip()
@@ -1943,8 +1940,6 @@ class P4Sync(Command, P4UserMap):
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
-                optparse.make_option("--import-local", dest="importIntoRemotes", action="store_false",
-                                     help="Import into refs/heads/ , not refs/remotes"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
                 optparse.make_option("--keep-path", dest="keepRepoPath", action='store_true',
                                      help="Keep entire BRANCH/DIR/SUBDIR prefix during import"),
@@ -1966,7 +1961,6 @@ class P4Sync(Command, P4UserMap):
         self.importLabels = False
         self.changesFile = ""
         self.syncWithOrigin = True
-        self.importIntoRemotes = True
         self.maxChanges = ""
         self.keepRepoPath = False
         self.depotPaths = None
@@ -2488,7 +2482,7 @@ class P4Sync(Command, P4UserMap):
 
     def getBranchMappingFromGitBranches(self):
         raise NotImplementedError( "Adapt to Perforce" )
-        branches = p4BranchesInGit(self.importIntoRemotes)
+        branches = p4BranchesInGit()
         for branch in branches.keys():
             if branch == "master":
                 branch = "main"
@@ -2686,10 +2680,7 @@ class P4Sync(Command, P4UserMap):
         self.knownBranches = {}
         self.initialParents = {}
 
-        if self.importIntoRemotes:
-            self.refPrefix = "refs/remotes/p4/"
-        else:
-            self.refPrefix = "refs/heads/p4/"
+        self.refPrefix = "refs/remotes/p4/" # TODO remove
 
         if self.syncWithOrigin:
             self.hasOrigin = originP4BranchesExist()
@@ -2715,7 +2706,7 @@ class P4Sync(Command, P4UserMap):
                 createOrUpdateBranchesFromOrigin(self.refPrefix, self.silent)
 
             # branches holds mapping from branch name to sha1
-            branches = p4BranchesInGit(self.importIntoRemotes)
+            branches = p4BranchesInGit()
 
             # restrict to just this one, disabling detect-branches
             self.p4BranchesInGit = branches.keys()
