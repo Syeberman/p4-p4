@@ -1962,25 +1962,18 @@ class P4Sync(Command, P4UserMap):
         self.maxChanges = ""
         self.depotPaths = None
         self.p4BranchesInGit = []
-        self.cloneExclude = []
         self.useClientSpec = False
         self.useClientSpec_from_options = False
         self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
-        self.cloneExclude = [re.sub(r"\.\.\.$", "", path)
-                             for path in self.cloneExclude]
         files = []
         fnum = 0
         while commit.has_key("depotFile%s" % fnum):
             path =  commit["depotFile%s" % fnum]
 
-            if [p for p in self.cloneExclude
-                if p4PathStartsWith(path, p)]:
-                found = False
-            else:
-                found = [p for p in self.depotPaths
-                         if p4PathStartsWith(path, p)]
+            found = [p for p in self.depotPaths
+                        if p4PathStartsWith(path, p)]
             if not found:
                 fnum = fnum + 1
                 continue
@@ -2899,21 +2892,12 @@ class P4Clone(P4Sync):
             optparse.make_option("--destination", dest="cloneDestination",
                                  action='store', default=None,
                                  help="where to leave result of the clone"),
-            optparse.make_option("-/", dest="cloneExclude",
-                                 action="append", type="string",
-                                 help="exclude depot path"),
             optparse.make_option("--bare", dest="cloneBare",
                                  action="store_true", default=False),
         ]
         self.cloneDestination = None
         self.needsGit = False
         self.cloneBare = False
-
-    # This is required for the "append" cloneExclude action
-    def ensure_value(self, attr, value):
-        if not hasattr(self, attr) or getattr(self, attr) is None:
-            setattr(self, attr, value)
-        return getattr(self, attr)
 
     def defaultDestination(self, args):
         ## TODO: use common prefix of args?
@@ -2935,7 +2919,6 @@ class P4Clone(P4Sync):
             self.cloneDestination = depotPaths[-1]
             depotPaths = depotPaths[:-1]
 
-        self.cloneExclude = ["/"+p for p in self.cloneExclude]
         for p in depotPaths:
             if not p.startswith("//"):
                 sys.stderr.write('Depot paths must start with "//": %s\n' % p)
