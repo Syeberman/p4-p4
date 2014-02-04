@@ -1941,6 +1941,7 @@ class P4Sync(Command, P4UserMap):
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
+                # TODO require a clientspec, given on command line
                 optparse.make_option("--use-client-spec", dest="useClientSpec", action='store_true',
                                      help="Only sync files that are included in the Perforce Client Spec")
         ]
@@ -1958,7 +1959,6 @@ class P4Sync(Command, P4UserMap):
         self.committedChanges = set()
         self.importLabels = False
         self.changesFile = ""
-        self.syncWithOrigin = True
         self.maxChanges = ""
         self.depotPaths = None
         self.p4BranchesInGit = []
@@ -1968,9 +1968,6 @@ class P4Sync(Command, P4UserMap):
         self.clientSpecDirs = None
         self.tempBranches = []
         self.tempBranchLocation = "git-p4-tmp"
-
-        if gitConfig("git-p4.syncFromOrigin") == "false":
-            self.syncWithOrigin = False
 
     # Force a checkpoint in fast-import and wait for it to finish
     def checkpoint(self):
@@ -2660,13 +2657,6 @@ class P4Sync(Command, P4UserMap):
         self.initialParents = {}
 
         self.refPrefix = "refs/remotes/p4/" # TODO remove
-
-        if self.syncWithOrigin:
-            self.hasOrigin = originP4BranchesExist()
-            if self.hasOrigin:
-                if not self.silent:
-                    print 'Syncing with origin first, using "git fetch origin"'
-                system("git fetch origin")
 
         # accept either the command-line option, or the configuration variable
         if self.useClientSpec:
