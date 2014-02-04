@@ -1966,17 +1966,6 @@ class P4Sync(Command, P4UserMap):
         self.useClientSpec = False
         self.useClientSpec_from_options = False
         self.clientSpecDirs = None
-        self.tempBranches = []
-        self.tempBranchLocation = "git-p4-tmp"
-
-    # Force a checkpoint in fast-import and wait for it to finish
-    def checkpoint(self):
-        raise NotImplementedError( "Adapt to Perforce" )
-        self.gitStream.write("checkpoint\n\n")
-        self.gitStream.write("progress checkpoint\n\n")
-        out = self.gitOutput.readline()
-        if self.verbose:
-            print "checkpoint finished: " + out
 
     def extractFilesFromCommit(self, commit):
         self.cloneExclude = [re.sub(r"\.\.\.$", "", path)
@@ -2523,10 +2512,6 @@ class P4Sync(Command, P4UserMap):
 
     def importNewBranch(self, branch, maxChange):
         raise NotImplementedError( "Adapt to Perforce" )
-        # make fast-import flush all changes to disk and update the refs using the checkpoint
-        # command so that we can try to find the branch parent in the git history
-        self.gitStream.write("checkpoint\n\n");
-        self.gitStream.flush();
         branchPrefix = self.depotPaths[0] + branch + "/"
         range = "@1,%s" % maxChange
         #print "prefix" + branchPrefix
@@ -2863,12 +2848,6 @@ class P4Sync(Command, P4UserMap):
             die("fast-import failed: %s" % self.gitError.read())
         self.gitOutput.close()
         self.gitError.close()
-
-        # Cleanup temporary branches created during import
-        if self.tempBranches != []:
-            for branch in self.tempBranches:
-                read_pipe("git update-ref -d %s" % branch)
-            os.rmdir(os.path.join(os.environ.get("GIT_DIR", ".git"), self.tempBranchLocation))
 
         return True
 
