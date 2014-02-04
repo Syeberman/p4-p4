@@ -1,4 +1,11 @@
 
+
+- While people working in two depots, will need a strategy to keep dest repo up-to-date
+-- either pull in to a different branch (//.old-depot): resurrect --branch and --keep-path
+-- or merge safely, and overwrite conflicts (at least old change is still there) and flag
+
+
+
 - Pull in any open branchspec that matches one of the imported paths
 -- ...but strip out any paths not imported
 -- I've removed --detect-branches

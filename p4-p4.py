@@ -1941,8 +1941,6 @@ class P4Sync(Command, P4UserMap):
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
-                optparse.make_option("--keep-path", dest="keepRepoPath", action='store_true',
-                                     help="Keep entire BRANCH/DIR/SUBDIR prefix during import"),
                 optparse.make_option("--use-client-spec", dest="useClientSpec", action='store_true',
                                      help="Only sync files that are included in the Perforce Client Spec")
         ]
@@ -1962,7 +1960,6 @@ class P4Sync(Command, P4UserMap):
         self.changesFile = ""
         self.syncWithOrigin = True
         self.maxChanges = ""
-        self.keepRepoPath = False
         self.depotPaths = None
         self.p4BranchesInGit = []
         self.cloneExclude = []
@@ -2021,21 +2018,6 @@ class P4Sync(Command, P4UserMap):
             # branch detection moves files up a level (the branch name)
             # from what client spec interpretation gives
             path = self.clientSpecDirs.map_in_client(path)
-
-        elif self.keepRepoPath:
-            # Preserve everything in relative path name except leading
-            # //depot/; just look at first prefix as they all should
-            # be in the same depot.
-            depot = re.sub("^(//[^/]+/).*", r'\1', prefixes[0])
-            if p4PathStartsWith(path, depot):
-                path = path[len(depot):]
-
-        else:
-            for p in prefixes:
-                if p4PathStartsWith(path, p):
-                    path = path[len(p):]
-                    break
-
         path = wildcard_decode(path)
         return path
 
@@ -2491,15 +2473,12 @@ class P4Sync(Command, P4UserMap):
             self.knownBranches[branch] = branch
 
     def updateOptionDict(self, d):
-        option_keys = {}
-        if self.keepRepoPath:
-            option_keys['keepRepoPath'] = 1
-
+        # TODO remove
+        option_keys = {} 
         d["options"] = ' '.join(sorted(option_keys.keys()))
 
     def readOptions(self, d):
-        self.keepRepoPath = (d.has_key('options')
-                             and ('keepRepoPath' in d['options']))
+        pass # TODO remove
 
     def gitRefForBranch(self, branch):
         raise NotImplementedError( "Adapt to Perforce" )
@@ -2980,10 +2959,6 @@ class P4Clone(P4Sync):
         raise NotImplementedError( "Adapt to Perforce" )
         if len(args) < 1:
             return False
-
-        if self.keepRepoPath and not self.cloneDestination:
-            sys.stderr.write("Must specify destination for --keep-path\n")
-            sys.exit(1)
 
         depotPaths = args
 
