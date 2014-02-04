@@ -1656,15 +1656,13 @@ class P4Submit(Command, P4UserMap):
             print "Internal error: cannot locate perforce depot path from existing branches"
             sys.exit(128)
 
-        self.useClientSpec = False
-        if gitConfigBool("git-p4.useclientspec"):
-            self.useClientSpec = True
-        if self.useClientSpec:
-            self.clientSpecDirs = getClientSpec()
+        self.clientSpec = False
+        if self.clientSpec:
+            self.clientSpecDirs = getClientSpec(self.clientSpec)
 
-        if self.useClientSpec:
+        if self.clientSpec:
             # all files are relative to the client spec
-            self.clientPath = getClientRoot()
+            self.clientPath = getClientRoot(self.clientSpec)
         else:
             self.clientPath = p4Where(self.depotPath)
 
@@ -1942,7 +1940,7 @@ class P4Sync(Command, P4UserMap):
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
                 # TODO require a clientspec, given on command line
-                optparse.make_option("--use-client-spec", dest="useClientSpec", action='store_true',
+                optparse.make_option("--client-spec", dest="clientSpec",
                                      help="Only sync files that are included in the Perforce Client Spec")
         ]
         self.description = """Imports from Perforce into a git repository.\n
@@ -1962,7 +1960,7 @@ class P4Sync(Command, P4UserMap):
         self.maxChanges = ""
         self.depotPaths = None
         self.p4BranchesInGit = []
-        self.useClientSpec = False
+        self.clientSpec = False
         self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
@@ -1992,7 +1990,7 @@ class P4Sync(Command, P4UserMap):
            self.depotPaths, or self.branchPrefixes in the case of
            branch detection."""
 
-        if self.useClientSpec:
+        if self.clientSpec:
             # branch detection moves files up a level (the branch name)
             # from what client spec interpretation gives
             path = self.clientSpecDirs.map_in_client(path)
@@ -2026,7 +2024,7 @@ class P4Sync(Command, P4UserMap):
 
             # start with the full relative path where this file would
             # go in a p4 client
-            if self.useClientSpec:
+            if self.clientSpec:
                 relPath = self.clientSpecDirs.map_in_client(path)
             else:
                 relPath = self.stripRepoPath(path, self.depotPaths)
@@ -2636,8 +2634,8 @@ class P4Sync(Command, P4UserMap):
         self.refPrefix = "refs/remotes/p4/" # TODO remove
 
         # accept either the command-line option, or the configuration variable
-        if self.useClientSpec:
-            self.clientSpecDirs = getClientSpec()
+        if self.clientSpec:
+            self.clientSpecDirs = getClientSpec(self.clientSpec)
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
