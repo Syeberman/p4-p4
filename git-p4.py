@@ -1,12 +1,31 @@
 #!/usr/bin/env python
 #
-# git-p4.py -- A tool for bidirectional operation between a Perforce depot and git.
+# p4-p4.py -- A tool for bidirectional operation between two Perforce depots.
 #
-# Author: Simon Hausmann <simon@lst.de>
-# Copyright: 2007 Simon Hausmann <simon@lst.de>
-#            2007 Trolltech ASA
-# License: MIT <http://www.opensource.org/licenses/mit-license.php>
+# Adapted from Git's git-p4.py:
+#   Author: Simon Hausmann <simon@lst.de>
+#   Copyright: 2007 Simon Hausmann <simon@lst.de>
+#              2007 Trolltech ASA
+#   License: MIT <http://www.opensource.org/licenses/mit-license.php>
 #
+#   Permission is hereby granted, free of charge, to any person obtaining a copy
+#    of this software and associated documentation files (the "Software"), to deal
+#    in the Software without restriction, including without limitation the rights
+#    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#    copies of the Software, and to permit persons to whom the Software is
+#    furnished to do so, subject to the following conditions:
+#   
+#   The above copyright notice and this permission notice shall be included in
+#    all copies or substantial portions of the Software.
+#   
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+#    THE SOFTWARE.
+
 import sys
 if sys.hexversion < 0x02040000:
     # The limiter is the subprocess module
@@ -388,6 +407,7 @@ def getP4Labels(depotPaths):
 
 # Return the set of all git tags
 def getGitTags():
+    raise NotImplementedError( "Adapt to Perforce" )
     gitTags = set()
     for line in read_pipe_lines(["git", "tag"]):
         tag = line.strip()
@@ -533,23 +553,28 @@ def p4Where(depotPath):
     return clientPath
 
 def currentGitBranch():
+    raise NotImplementedError( "Adapt to Perforce" )
     return read_pipe("git name-rev HEAD").split(" ")[1].strip()
 
 def isValidGitDir(path):
+    raise NotImplementedError( "Adapt to Perforce" )
     if (os.path.exists(path + "/HEAD")
         and os.path.exists(path + "/refs") and os.path.exists(path + "/objects")):
         return True;
     return False
 
 def parseRevision(ref):
+    raise NotImplementedError( "Adapt to Perforce" )
     return read_pipe("git rev-parse %s" % ref).strip()
 
 def branchExists(ref):
+    raise NotImplementedError( "Adapt to Perforce" )
     rev = read_pipe(["git", "rev-parse", "-q", "--verify", ref],
                      ignore_error=True)
     return len(rev) > 0
 
 def extractLogMessageFromGitCommit(commit):
+    raise NotImplementedError( "Adapt to Perforce" )
     logMessage = ""
 
     ## fixme: title is first line of commit, not 1st paragraph.
@@ -564,6 +589,7 @@ def extractLogMessageFromGitCommit(commit):
     return logMessage
 
 def extractSettingsGitLog(log):
+    raise NotImplementedError( "Adapt to Perforce" )
     values = {}
     for line in log.split("\n"):
         line = line.strip()
@@ -589,6 +615,7 @@ def extractSettingsGitLog(log):
     return values
 
 def gitBranchExists(branch):
+    raise NotImplementedError( "Adapt to Perforce" )
     proc = subprocess.Popen(["git", "rev-parse", branch],
                             stderr=subprocess.PIPE, stdout=subprocess.PIPE);
     return proc.wait() == 0;
@@ -596,6 +623,7 @@ def gitBranchExists(branch):
 _gitConfig = {}
 
 def gitConfig(key):
+    raise NotImplementedError( "Adapt to Perforce" )
     if not _gitConfig.has_key(key):
         cmd = [ "git", "config", key ]
         s = read_pipe(cmd, ignore_error=True)
@@ -606,6 +634,7 @@ def gitConfigBool(key):
     """Return a bool, using git config --bool.  It is True only if the
        variable is set to true, and False if set to false or not present
        in the config."""
+    raise NotImplementedError( "Adapt to Perforce" )
 
     if not _gitConfig.has_key(key):
         cmd = [ "git", "config", "--bool", key ]
@@ -615,6 +644,7 @@ def gitConfigBool(key):
     return _gitConfig[key]
 
 def gitConfigList(key):
+    raise NotImplementedError( "Adapt to Perforce" )
     if not _gitConfig.has_key(key):
         s = read_pipe(["git", "config", "--get-all", key], ignore_error=True)
         _gitConfig[key] = s.strip().split(os.linesep)
@@ -626,6 +656,7 @@ def p4BranchesInGit(branchesAreInRemotes=True):
        a dictionary of { branch: revision } for each one found.
        The branch names are the short names, without any
        "p4/" prefix."""
+    raise NotImplementedError( "Adapt to Perforce" )
 
     branches = {}
 
@@ -654,6 +685,7 @@ def p4BranchesInGit(branchesAreInRemotes=True):
 
 def branch_exists(branch):
     """Make sure that the given ref name really exists."""
+    raise NotImplementedError( "Adapt to Perforce" )
 
     cmd = [ "git", "rev-parse", "--symbolic", "--verify", branch ]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -691,6 +723,7 @@ def findUpstreamBranchPoint(head = "HEAD"):
     return ["", settings]
 
 def createOrUpdateBranchesFromOrigin(localRefPrefix = "refs/remotes/p4/", silent=True):
+    raise NotImplementedError( "Adapt to Perforce" )
     if not silent:
         print ("Creating/updating branch(es) in %s based on origin branch(es)"
                % localRefPrefix)
@@ -738,6 +771,7 @@ def createOrUpdateBranchesFromOrigin(localRefPrefix = "refs/remotes/p4/", silent
             system("git update-ref %s %s" % (remoteHead, originHead))
 
 def originP4BranchesExist():
+    raise NotImplementedError( "Adapt to Perforce" )
         return gitBranchExists("origin") or gitBranchExists("origin/p4") or gitBranchExists("origin/p4/master")
 
 def p4ChangesForPaths(depotPaths, changeRange):
@@ -871,6 +905,7 @@ class P4UserMap:
             return True
 
     def getUserCacheFilename(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         home = os.environ.get("HOME", os.environ.get("USERPROFILE"))
         return home + "/.gitp4-usercache.txt"
 
@@ -932,6 +967,7 @@ class P4RollBack(Command):
         self.rollbackLocalBranches = False
 
     def run(self, args):
+        raise NotImplementedError( "Adapt to Perforce" )
         if len(args) != 1:
             return False
         maxChange = int(args[0])
@@ -1097,6 +1133,7 @@ class P4Submit(Command, P4UserMap):
         print "Patched up RCS keywords in %s" % file
 
     def p4UserForCommit(self,id):
+        raise NotImplementedError( "Adapt to Perforce" )
         # Return the tuple (perforce user,git email) for a given git commit id
         self.getUserMapFromPerforceServer()
         gitEmail = read_pipe(["git", "log", "--max-count=1",
@@ -1206,6 +1243,7 @@ class P4Submit(Command, P4UserMap):
     def edit_template(self, template_file):
         """Invoke the editor to let the user change the submission
            message.  Return true if okay to continue with the submit."""
+        raise NotImplementedError( "Adapt to Perforce" )
 
         # if configured to skip the editing part, just submit
         if gitConfigBool("git-p4.skipSubmitEdit"):
@@ -1241,6 +1279,7 @@ class P4Submit(Command, P4UserMap):
     def applyCommit(self, id):
         """Apply one commit, return True if it succeeded."""
 
+        raise NotImplementedError( "Adapt to Perforce" )
         print "Applying", read_pipe(["git", "show", "-s",
                                      "--format=format:%h %s", id])
 
@@ -1508,6 +1547,7 @@ class P4Submit(Command, P4UserMap):
     # Export git tags as p4 labels. Create a p4 label and then tag
     # with that.
     def exportGitTags(self, gitTags):
+        raise NotImplementedError( "Adapt to Perforce" )
         validLabelRegexp = gitConfig("git-p4.labelExportRegexp")
         if len(validLabelRegexp) == 0:
             validLabelRegexp = defaultLabelRegexp
@@ -1577,6 +1617,7 @@ class P4Submit(Command, P4UserMap):
                     print "created p4 label for tag %s" % name
 
     def run(self, args):
+        raise NotImplementedError( "Adapt to Perforce" )
         if len(args) == 0:
             self.master = currentGitBranch()
             if len(self.master) == 0 or not gitBranchExists("refs/heads/%s" % self.master):
@@ -1949,6 +1990,7 @@ class P4Sync(Command, P4UserMap):
 
     # Force a checkpoint in fast-import and wait for it to finish
     def checkpoint(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         self.gitStream.write("checkpoint\n\n")
         self.gitStream.write("progress checkpoint\n\n")
         out = self.gitOutput.readline()
@@ -2061,6 +2103,7 @@ class P4Sync(Command, P4UserMap):
     # - helper for streamP4Files
 
     def streamOneP4File(self, file, contents):
+        raise NotImplementedError( "Adapt to Perforce" )
         relPath = self.stripRepoPath(file['depotFile'], self.branchPrefixes)
         if verbose:
             sys.stderr.write("%s\n" % relPath)
@@ -2138,6 +2181,7 @@ class P4Sync(Command, P4UserMap):
         self.gitStream.write("\n")
 
     def streamOneP4Deletion(self, file):
+        raise NotImplementedError( "Adapt to Perforce" )
         relPath = self.stripRepoPath(file['path'], self.branchPrefixes)
         if verbose:
             sys.stderr.write("delete %s\n" % relPath)
@@ -2145,6 +2189,7 @@ class P4Sync(Command, P4UserMap):
 
     # handle another chunk of streaming data
     def streamP4FilesCb(self, marshalled):
+        raise NotImplementedError( "Adapt to Perforce" )
 
         # catch p4 errors and complain
         err = None
@@ -2188,6 +2233,7 @@ class P4Sync(Command, P4UserMap):
 
     # Stream directly from "p4 files" into "git fast-import"
     def streamP4Files(self, files):
+        raise NotImplementedError( "Adapt to Perforce" )
         filesForCommit = []
         filesToRead = []
         filesToDelete = []
@@ -2236,6 +2282,7 @@ class P4Sync(Command, P4UserMap):
 
     # Stream a p4 tag
     def streamTag(self, gitStream, labelName, labelDetails, commit, epoch):
+        raise NotImplementedError( "Adapt to Perforce" )
         if verbose:
             print "writing tag %s for commit %s" % (labelName, commit)
         gitStream.write("tag %s\n" % labelName)
@@ -2267,6 +2314,7 @@ class P4Sync(Command, P4UserMap):
         gitStream.write("\n")
 
     def commit(self, details, files, branch, parent = ""):
+        raise NotImplementedError( "Adapt to Perforce" )
         epoch = details["time"]
         author = details["user"]
 
@@ -2376,6 +2424,7 @@ class P4Sync(Command, P4UserMap):
     # then we can use that, or it's something more complicated we should
     # just ignore.
     def importP4Labels(self, stream, p4Labels):
+        raise NotImplementedError( "Adapt to Perforce" )
         if verbose:
             print "import p4 labels: " + ' '.join(p4Labels)
 
@@ -2444,6 +2493,7 @@ class P4Sync(Command, P4UserMap):
             return p
 
     def getBranchMapping(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         lostAndFoundBranches = set()
 
         user = gitConfig("git-p4.branchUser")
@@ -2505,6 +2555,7 @@ class P4Sync(Command, P4UserMap):
             self.knownBranches[branch] = branch
 
     def getBranchMappingFromGitBranches(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         branches = p4BranchesInGit(self.importIntoRemotes)
         for branch in branches.keys():
             if branch == "master":
@@ -2525,6 +2576,7 @@ class P4Sync(Command, P4UserMap):
                              and ('keepRepoPath' in d['options']))
 
     def gitRefForBranch(self, branch):
+        raise NotImplementedError( "Adapt to Perforce" )
         if branch == "main":
             return self.refPrefix + "master"
 
@@ -2534,6 +2586,7 @@ class P4Sync(Command, P4UserMap):
         return self.refPrefix + self.projectName + branch
 
     def gitCommitByP4Change(self, ref, change):
+        raise NotImplementedError( "Adapt to Perforce" )
         if self.verbose:
             print "looking in ref " + ref + " for change %s using bisect..." % change
 
@@ -2567,6 +2620,7 @@ class P4Sync(Command, P4UserMap):
         return ""
 
     def importNewBranch(self, branch, maxChange):
+        raise NotImplementedError( "Adapt to Perforce" )
         # make fast-import flush all changes to disk and update the refs using the checkpoint
         # command so that we can try to find the branch parent in the git history
         self.gitStream.write("checkpoint\n\n");
@@ -2595,6 +2649,7 @@ class P4Sync(Command, P4UserMap):
         return True
 
     def searchParent(self, parent, branch, target):
+        raise NotImplementedError( "Adapt to Perforce" )
         parentFound = False
         for blob in read_pipe_lines(["git", "rev-list", "--reverse",
                                      "--no-merges", parent]):
@@ -2692,6 +2747,7 @@ class P4Sync(Command, P4UserMap):
                 sys.exit(1)
 
     def importHeadRevision(self, revision):
+        raise NotImplementedError( "Adapt to Perforce" )
         print "Doing initial import of %s from revision %s into %s" % (' '.join(self.depotPaths), revision, self.branch)
 
         details = {}
@@ -2749,6 +2805,7 @@ class P4Sync(Command, P4UserMap):
 
 
     def run(self, args):
+        raise NotImplementedError( "Adapt to Perforce" )
         self.depotPaths = []
         self.changeRange = ""
         self.previousDepotPaths = []
@@ -3071,6 +3128,7 @@ class P4Rebase(Command):
         return self.rebase()
 
     def rebase(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         if os.system("git update-index --refresh") != 0:
             die("Some files in your working directory are modified and different than what is in your index. You can use git update-index <filename> to bring the index up-to-date or stash away all your changes with git stash.");
         if len(read_pipe("git diff-index HEAD --")) > 0:
@@ -3091,6 +3149,7 @@ class P4Rebase(Command):
 
 class P4Clone(P4Sync):
     def __init__(self):
+        raise NotImplementedError( "Adapt to Perforce" )
         P4Sync.__init__(self)
         self.description = "Creates a new git repository and imports from Perforce into it"
         self.usage = "usage: %prog [options] //depot/path[@revRange]"
@@ -3124,6 +3183,7 @@ class P4Clone(P4Sync):
         return os.path.split(depotDir)[1]
 
     def run(self, args):
+        raise NotImplementedError( "Adapt to Perforce" )
         if len(args) < 1:
             return False
 
@@ -3186,6 +3246,7 @@ class P4Branches(Command):
         self.verbose = False
 
     def run(self, args):
+        raise NotImplementedError( "Adapt to Perforce" )
         if originP4BranchesExist():
             createOrUpdateBranchesFromOrigin()
 
@@ -3236,6 +3297,7 @@ commands = {
 
 
 def main():
+    raise NotImplementedError( "Adapt to Perforce" )
     if len(sys.argv[1:]) == 0:
         printUsage(commands.keys())
         sys.exit(2)
