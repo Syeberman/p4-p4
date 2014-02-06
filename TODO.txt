@@ -1,10 +1,14 @@
 
 
+- Keep track of hashes of file revisions, and do "p4 copy" from those files as appropriate
+-- Helps to correct files that should have been marked copy
+-- Also helps Perforce do lazy copies
+-- After "p4 copy", update the hash2depot to the _new_ location, so future copies use latest
+    revision (makes history a little more sane)
+
 - While people working in two depots, will need a strategy to keep dest repo up-to-date
--- either pull in to a different branch (//.old-depot): resurrect --branch and --keep-path
+-- either pull in to a different branch (//.repo0): resurrect --branch and --keep-path
 -- or merge safely, and overwrite conflicts (at least old change is still there) and flag
-
-
 
 - Pull in any open branchspec that matches one of the imported paths
 -- ...but strip out any paths not imported
@@ -13,5 +17,6 @@
 
 - Pull in labels....maybe?
 
+- Pull in jobs...maybe?
 
 

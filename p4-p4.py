@@ -33,6 +33,7 @@ if sys.hexversion < 0x02040000:
     sys.exit(1)
 import os
 import optparse
+import pprint
 import marshal
 import subprocess
 import tempfile
@@ -71,26 +72,26 @@ def p4_build_cmd(cmd):
     """
     real_cmd = ["p4"]
 
-    user = gitConfig("git-p4.user")
-    if len(user) > 0:
-        real_cmd += ["-u",user]
+    if 0: # FIXME pull this info from another location
+        user = gitConfig("git-p4.user")
+        if len(user) > 0:
+            real_cmd += ["-u",user]
 
-    password = gitConfig("git-p4.password")
-    if len(password) > 0:
-        real_cmd += ["-P", password]
+        password = gitConfig("git-p4.password")
+        if len(password) > 0:
+            real_cmd += ["-P", password]
 
-    port = gitConfig("git-p4.port")
-    if len(port) > 0:
-        real_cmd += ["-p", port]
+        port = gitConfig("git-p4.port")
+        if len(port) > 0:
+            real_cmd += ["-p", port]
 
-    host = gitConfig("git-p4.host")
-    if len(host) > 0:
-        real_cmd += ["-H", host]
+        host = gitConfig("git-p4.host")
+        if len(host) > 0:
+            real_cmd += ["-H", host]
 
-    client = gitConfig("git-p4.client")
-    if len(client) > 0:
-        real_cmd += ["-c", client]
-
+        client = gitConfig("git-p4.client")
+        if len(client) > 0:
+            real_cmd += ["-c", client]
 
     if isinstance(cmd,basestring):
         real_cmd = ' '.join(real_cmd) + ' ' + cmd
@@ -650,36 +651,6 @@ def gitConfigList(key):
         _gitConfig[key] = s.strip().split(os.linesep)
     return _gitConfig[key]
 
-def p4BranchesInGit():
-    """Find all the branches whose names start with "p4/", looking
-       in remotes or heads as specified by the argument.  Return
-       a dictionary of { branch: revision } for each one found.
-       The branch names are the short names, without any
-       "p4/" prefix."""
-    raise NotImplementedError( "Adapt to Perforce" )
-
-    branches = {}
-
-    cmdline = "git rev-parse --symbolic "
-    cmdline += "--remotes"
-
-    for line in read_pipe_lines(cmdline):
-        line = line.strip()
-
-        # only import to p4/
-        if not line.startswith('p4/'):
-            continue
-        # special symbolic ref to p4/master
-        if line == "p4/HEAD":
-            continue
-
-        # strip off p4/ prefix
-        branch = line[len("p4/"):]
-
-        branches[branch] = parseRevision(line)
-
-    return branches
-
 def branch_exists(branch):
     """Make sure that the given ref name really exists."""
     raise NotImplementedError( "Adapt to Perforce" )
@@ -691,33 +662,6 @@ def branch_exists(branch):
         return False
     # expect exactly one line of output: the branch name
     return out.rstrip() == branch
-
-def findUpstreamBranchPoint(head = "HEAD"):
-    branches = p4BranchesInGit()
-    # map from depot-path to branch name
-    branchByDepotPath = {}
-    for branch in branches.keys():
-        tip = branches[branch]
-        log = extractLogMessageFromGitCommit(tip)
-        settings = extractSettingsGitLog(log)
-        if settings.has_key("depot-paths"):
-            paths = ",".join(settings["depot-paths"])
-            branchByDepotPath[paths] = "remotes/p4/" + branch
-
-    settings = None
-    parent = 0
-    while parent < 65535:
-        commit = head + "~%s" % parent
-        log = extractLogMessageFromGitCommit(commit)
-        settings = extractSettingsGitLog(log)
-        if settings.has_key("depot-paths"):
-            paths = ",".join(settings["depot-paths"])
-            if branchByDepotPath.has_key(paths):
-                return [branchByDepotPath[paths], settings]
-
-        parent = parent + 1
-
-    return ["", settings]
 
 def createOrUpdateBranchesFromOrigin(localRefPrefix = "refs/remotes/p4/", silent=True):
     raise NotImplementedError( "Adapt to Perforce" )
@@ -769,7 +713,7 @@ def createOrUpdateBranchesFromOrigin(localRefPrefix = "refs/remotes/p4/", silent
 
 def originP4BranchesExist():
     raise NotImplementedError( "Adapt to Perforce" )
-        return gitBranchExists("origin") or gitBranchExists("origin/p4") or gitBranchExists("origin/p4/master")
+    return gitBranchExists("origin") or gitBranchExists("origin/p4") or gitBranchExists("origin/p4/master")
 
 def p4ChangesForPaths(depotPaths, changeRange):
     assert depotPaths
@@ -951,7 +895,7 @@ class P4Debug(Command):
         for output in p4CmdList(args):
             print 'Element: %d' % j
             j += 1
-            print output
+            pprint.pprint( output )
         return True
 
 class P4RollBack(Command):
@@ -1943,7 +1887,9 @@ class P4Sync(Command, P4UserMap):
                 optparse.make_option("--client-spec", dest="clientSpec",
                                      help="Only sync files that are included in the Perforce Client Spec")
         ]
-        self.description = """Imports from Perforce into a git repository.\n
+        # XXX Note the terminology!  The primary direction of changes is repo0->repo1, but 
+        # P4Submit moves individual changes from repo1->repo0.
+        self.description = """Imports from one Perforce repo (repo0) into another (repo1).\n
     example:
     //depot/my/project/ -- to import the current head
     //depot/my/project/@all -- to import everything
@@ -1958,8 +1904,6 @@ class P4Sync(Command, P4UserMap):
         self.importLabels = False
         self.changesFile = ""
         self.maxChanges = ""
-        self.depotPaths = None
-        self.p4BranchesInGit = []
         self.clientSpec = False
         self.clientSpecDirs = None
 
@@ -1970,11 +1914,12 @@ class P4Sync(Command, P4UserMap):
         while commit.has_key("depotFile%s" % fnum):
             path =  commit["depotFile%s" % fnum]
 
-            found = [p for p in self.depotPaths
-                        if p4PathStartsWith(path, p)]
-            if not found:
-                fnum = fnum + 1
-                continue
+            # if using a client spec, only consider files that have
+            # a path in the client
+            if self.clientSpecDirs:
+                if not self.clientSpecDirs.map_in_client(path):
+                    fnum = fnum + 1
+                    continue
 
             file = {}
             file["path"] = path
@@ -2137,12 +2082,6 @@ class P4Sync(Command, P4UserMap):
         filesToDelete = []
 
         for f in files:
-            # if using a client spec, only add the files that have
-            # a path in the client
-            if self.clientSpecDirs:
-                if self.clientSpecDirs.map_in_client(f['path']) == "":
-                    continue
-
             filesForCommit.append(f)
             if f['action'] in self.delete_actions:
                 filesToDelete.append(f)
@@ -2395,23 +2334,10 @@ class P4Sync(Command, P4UserMap):
         for branch in lostAndFoundBranches:
             self.knownBranches[branch] = branch
 
-    def getBranchMappingFromGitBranches(self):
-        raise NotImplementedError( "Adapt to Perforce" )
-        branches = p4BranchesInGit()
-        for branch in branches.keys():
-            if branch == "master":
-                branch = "main"
-            else:
-                branch = branch[len(self.projectName):]
-            self.knownBranches[branch] = branch
-
     def updateOptionDict(self, d):
         # TODO remove
         option_keys = {} 
         d["options"] = ' '.join(sorted(option_keys.keys()))
-
-    def readOptions(self, d):
-        pass # TODO remove
 
     def gitRefForBranch(self, branch):
         raise NotImplementedError( "Adapt to Perforce" )
@@ -2578,11 +2504,8 @@ class P4Sync(Command, P4UserMap):
 
 
     def run(self, args):
-        raise NotImplementedError( "Adapt to Perforce" )
         self.depotPaths = []
         self.changeRange = ""
-        self.previousDepotPaths = []
-        self.hasOrigin = False
 
         # map from branch depot path to parent branch
         self.knownBranches = {}
@@ -2597,54 +2520,7 @@ class P4Sync(Command, P4UserMap):
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
         if args == []:
-            if self.hasOrigin:
-                createOrUpdateBranchesFromOrigin(self.refPrefix, self.silent)
-
-            # branches holds mapping from branch name to sha1
-            branches = p4BranchesInGit()
-
-            # restrict to just this one, disabling detect-branches
-            self.p4BranchesInGit = branches.keys()
-
-            if len(self.p4BranchesInGit) > 1:
-                if not self.silent:
-                    print "Importing from/into multiple branches"
-                for branch in branches.keys():
-                    self.initialParents[self.refPrefix + branch] = \
-                        branches[branch]
-
-            if self.verbose:
-                print "branches: %s" % self.p4BranchesInGit
-
-            p4Change = 0
-            for branch in self.p4BranchesInGit:
-                logMsg =  extractLogMessageFromGitCommit(self.refPrefix + branch)
-
-                settings = extractSettingsGitLog(logMsg)
-
-                self.readOptions(settings)
-                if (settings.has_key('depot-paths')
-                    and settings.has_key ('change')):
-                    change = int(settings['change']) + 1
-                    p4Change = max(p4Change, change)
-
-                    depotPaths = sorted(settings['depot-paths'])
-                    if self.previousDepotPaths == []:
-                        self.previousDepotPaths = depotPaths
-                    else:
-                        paths = []
-                        for (prev, cur) in zip(self.previousDepotPaths, depotPaths):
-                            prev_list = prev.split("/")
-                            cur_list = cur.split("/")
-                            for i in range(0, min(len(cur_list), len(prev_list))):
-                                if cur_list[i] <> prev_list[i]:
-                                    i = i - 1
-                                    break
-
-                            paths.append ("/".join(cur_list[:i + 1]))
-
-                        self.previousDepotPaths = paths
-
+            p4Change = None # FIXME set to last-imported-change + 1
             if p4Change > 0:
                 self.depotPaths = sorted(self.previousDepotPaths)
                 self.changeRange = "@%s,#head" % p4Change
@@ -2713,13 +2589,11 @@ class P4Sync(Command, P4UserMap):
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
-        self.importProcess = subprocess.Popen(["git", "fast-import"],
-                                              stdin=subprocess.PIPE,
-                                              stdout=subprocess.PIPE,
-                                              stderr=subprocess.PIPE);
-        self.gitOutput = self.importProcess.stdout
-        self.gitStream = self.importProcess.stdin
-        self.gitError = self.importProcess.stderr
+        # TODO Replace with versions for p4-as-dest
+        self.importProcess = None
+        self.gitOutput = None
+        self.gitStream = None
+        self.gitError = None
 
         if revision:
             self.importHeadRevision(revision)
@@ -2737,12 +2611,6 @@ class P4Sync(Command, P4UserMap):
 
                 changes.sort()
             else:
-                # catch "git p4 sync" with no new branches, in a repo that
-                # does not have any existing p4 branches
-                if len(args) == 0:
-                    if not self.p4BranchesInGit:
-                        die("No remote p4 branches.  Perhaps you never did \"git p4 clone\" in here.")
-
                 if self.verbose:
                     print "Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
                                                               self.changeRange)
@@ -2954,7 +2822,6 @@ commands = {
 
 
 def main():
-    raise NotImplementedError( "Adapt to Perforce" )
     if len(sys.argv[1:]) == 0:
         printUsage(commands.keys())
         sys.exit(2)
@@ -2970,14 +2837,9 @@ def main():
         sys.exit(2)
 
     options = cmd.options
-    cmd.gitdir = os.environ.get("GIT_DIR", None)
-
     args = sys.argv[2:]
 
     options.append(optparse.make_option("--verbose", "-v", dest="verbose", action="store_true"))
-    if cmd.needsGit:
-        options.append(optparse.make_option("--git-dir", dest="gitdir"))
-
     parser = optparse.OptionParser(cmd.usage.replace("%prog", "%prog " + cmdName),
                                    options,
                                    description = cmd.description,
@@ -2986,28 +2848,10 @@ def main():
     (cmd, args) = parser.parse_args(sys.argv[2:], cmd);
     global verbose
     verbose = cmd.verbose
-    if cmd.needsGit:
-        if cmd.gitdir == None:
-            cmd.gitdir = os.path.abspath(".git")
-            if not isValidGitDir(cmd.gitdir):
-                cmd.gitdir = read_pipe("git rev-parse --git-dir").strip()
-                if os.path.exists(cmd.gitdir):
-                    cdup = read_pipe("git rev-parse --show-cdup").strip()
-                    if len(cdup) > 0:
-                        chdir(cdup);
-
-        if not isValidGitDir(cmd.gitdir):
-            if isValidGitDir(cmd.gitdir + "/.git"):
-                cmd.gitdir += "/.git"
-            else:
-                die("fatal: cannot locate git repository at %s" % cmd.gitdir)
-
-        os.environ["GIT_DIR"] = cmd.gitdir
 
     if not cmd.run(args):
         parser.print_help()
         sys.exit(2)
-
 
 if __name__ == '__main__':
     main()
