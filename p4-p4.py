@@ -1931,15 +1931,9 @@ class P4Sync(Command, P4UserMap):
         return files
 
     def stripRepoPath(self, path, prefixes):
-        """When streaming files, this is called to map a p4 depot path
-           to where it should go in git.  The prefixes are either
-           self.depotPaths, or self.branchPrefixes in the case of
-           branch detection."""
-
-        if self.clientSpec:
-            # branch detection moves files up a level (the branch name)
-            # from what client spec interpretation gives
-            path = self.clientSpecDirs.map_in_client(path)
+        """When streaming files, this is called to map a repo0 path
+           to where it should go in repo1."""
+        # TODO Use this
         path = wildcard_decode(path)
         return path
 
@@ -2263,54 +2257,6 @@ class P4Sync(Command, P4UserMap):
                 # ignore will need to be removed manually.
                 system(["git", "config", "--add", "git-p4.ignoredP4Labels", name])
 
-    def guessProjectName(self):
-        for p in self.depotPaths:
-            if p.endswith("/"):
-                p = p[:-1]
-            p = p[p.strip().rfind("/") + 1:]
-            if not p.endswith("/"):
-               p += "/"
-            return p
-
-    def getBranchMapping(self):
-        raise NotImplementedError( "Adapt to Perforce" )
-        lostAndFoundBranches = set()
-
-        user = gitConfig("git-p4.branchUser")
-        if len(user) > 0:
-            command = "branches -u %s" % user
-        else:
-            command = "branches"
-
-        for info in p4CmdList(command):
-            details = p4Cmd(["branch", "-o", info["branch"]])
-            viewIdx = 0
-            while details.has_key("View%s" % viewIdx):
-                paths = details["View%s" % viewIdx].split(" ")
-                viewIdx = viewIdx + 1
-                # require standard //depot/foo/... //depot/bar/... mapping
-                if len(paths) != 2 or not paths[0].endswith("/...") or not paths[1].endswith("/..."):
-                    continue
-                source = paths[0]
-                destination = paths[1]
-                ## HACK
-                if p4PathStartsWith(source, self.depotPaths[0]) and p4PathStartsWith(destination, self.depotPaths[0]):
-                    source = source[len(self.depotPaths[0]):-4]
-                    destination = destination[len(self.depotPaths[0]):-4]
-
-                    if destination in self.knownBranches:
-                        if not self.silent:
-                            print "p4 branch %s defines a mapping from %s to %s" % (info["branch"], source, destination)
-                            print "but there exists another mapping from %s to %s already!" % (self.knownBranches[destination], destination)
-                        continue
-
-                    self.knownBranches[destination] = source
-
-                    lostAndFoundBranches.discard(destination)
-
-                    if source not in self.knownBranches:
-                        lostAndFoundBranches.add(source)
-
         # Perforce does not strictly require branches to be defined, so we also
         # check git config for a branch list.
         #
@@ -2382,47 +2328,6 @@ class P4Sync(Command, P4UserMap):
                 latestCommit = "%s" % next
 
         return ""
-
-    def importNewBranch(self, branch, maxChange):
-        raise NotImplementedError( "Adapt to Perforce" )
-        branchPrefix = self.depotPaths[0] + branch + "/"
-        range = "@1,%s" % maxChange
-        #print "prefix" + branchPrefix
-        changes = p4ChangesForPaths([branchPrefix], range)
-        if len(changes) <= 0:
-            return False
-        firstChange = changes[0]
-        #print "first change in branch: %s" % firstChange
-        sourceBranch = self.knownBranches[branch]
-        sourceDepotPath = self.depotPaths[0] + sourceBranch
-        sourceRef = self.gitRefForBranch(sourceBranch)
-        #print "source " + sourceBranch
-
-        branchParentChange = int(p4Cmd(["changes", "-m", "1", "%s...@1,%s" % (sourceDepotPath, firstChange)])["change"])
-        #print "branch parent: %s" % branchParentChange
-        gitParent = self.gitCommitByP4Change(sourceRef, branchParentChange)
-        if len(gitParent) > 0:
-            self.initialParents[self.gitRefForBranch(branch)] = gitParent
-            #print "parent git commit: %s" % gitParent
-
-        self.importChanges(changes)
-        return True
-
-    def searchParent(self, parent, branch, target):
-        raise NotImplementedError( "Adapt to Perforce" )
-        parentFound = False
-        for blob in read_pipe_lines(["git", "rev-list", "--reverse",
-                                     "--no-merges", parent]):
-            blob = blob.strip()
-            if len(read_pipe(["git", "diff-tree", blob, target])) == 0:
-                parentFound = True
-                if self.verbose:
-                    print "Found parent of %s in commit %s" % (branch, blob)
-                break
-        if parentFound:
-            return blob
-        else:
-            return None
 
     def importChanges(self, changes):
         cnt = 1
@@ -2504,7 +2409,6 @@ class P4Sync(Command, P4UserMap):
 
 
     def run(self, args):
-        self.depotPaths = []
         self.changeRange = ""
 
         # map from branch depot path to parent branch
@@ -2519,71 +2423,26 @@ class P4Sync(Command, P4UserMap):
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
-        if args == []:
-            p4Change = None # FIXME set to last-imported-change + 1
+        if not args:
+            p4Change = 0 # FIXME set to last-imported-change + 1
             if p4Change > 0:
-                self.depotPaths = sorted(self.previousDepotPaths)
                 self.changeRange = "@%s,#head" % p4Change
                 if not self.silent:
                     print "Performing incremental import"
 
-        if len(args) == 0 and self.depotPaths:
-            if not self.silent:
-                print "Depot paths: %s" % ' '.join(self.depotPaths)
-        else:
-            if self.depotPaths and self.depotPaths != args:
-                print ("previous import used depot path %s and now %s was specified. "
-                       "This doesn't work!" % (' '.join (self.depotPaths),
-                                               ' '.join (args)))
-                sys.exit(1)
-
-            self.depotPaths = sorted(args)
+        if args:
+            print "Import paths must come from a clientspec, currently."
+            sys.exit(1)
 
         revision = ""
         self.users = {}
 
-        # Make sure no revision specifiers are used when --changesfile
+        # TODO Make sure no revision specifiers are used when --changesfile
         # is specified.
-        bad_changesfile = False
-        if len(self.changesFile) > 0:
-            for p in self.depotPaths:
-                if p.find("@") >= 0 or p.find("#") >= 0:
-                    bad_changesfile = True
-                    break
-        if bad_changesfile:
-            die("Option --changesfile is incompatible with revision specifiers")
 
-        newPaths = []
-        for p in self.depotPaths:
-            if p.find("@") != -1:
-                atIdx = p.index("@")
-                self.changeRange = p[atIdx:]
-                if self.changeRange == "@all":
-                    self.changeRange = ""
-                elif ',' not in self.changeRange:
-                    revision = self.changeRange
-                    self.changeRange = ""
-                p = p[:atIdx]
-            elif p.find("#") != -1:
-                hashIdx = p.index("#")
-                revision = p[hashIdx:]
-                p = p[:hashIdx]
-            elif self.previousDepotPaths == []:
-                # pay attention to changesfile, if given, else import
-                # the entire p4 tree at the head revision
-                if len(self.changesFile) == 0:
-                    revision = "#head"
-
-            p = re.sub ("\.\.\.$", "", p)
-            if not p.endswith("/"):
-                p += "/"
-
-            newPaths.append(p)
-
-        self.depotPaths = newPaths
-
-        # --detect-branches may change this for each branch
-        self.branchPrefixes = self.depotPaths
+        # import the entire p4 tree, as per the clientspec, at the head revision
+        # TODO specify a revision
+        revision = "#head"
 
         self.loadUserMapFromCache()
 
@@ -2611,6 +2470,7 @@ class P4Sync(Command, P4UserMap):
 
                 changes.sort()
             else:
+                raise NotImplementedError( "TODO A better way to get list of changes" )
                 if self.verbose:
                     print "Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
                                                               self.changeRange)
