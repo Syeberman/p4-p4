@@ -743,20 +743,17 @@ def p4PathStartsWith(path, prefix):
         return path.lower().startswith(prefix.lower())
     return path.startswith(prefix)
 
-def getClientSpec():
+def getClientSpec(client_name):
     """Look at the p4 client spec, create a View() object that contains
        all the mappings, and return it."""
 
-    specList = p4CmdList("client -o")
+    specList = p4CmdList("client -o " + client_name)
     if len(specList) != 1:
         die('Output from "client -o" is %d lines, expecting 1' %
             len(specList))
 
     # dictionary of all client parameters
     entry = specList[0]
-
-    # the //client/ name
-    client_name = entry["Client"]
 
     # just the keys that start with "View"
     view_keys = [ k for k in entry.keys() if k.startswith("View") ]
@@ -845,11 +842,6 @@ class P4UserMap:
         else:
             return True
 
-    def getUserCacheFilename(self):
-        raise NotImplementedError( "Adapt to Perforce" )
-        home = os.environ.get("HOME", os.environ.get("USERPROFILE"))
-        return home + "/.gitp4-usercache.txt"
-
     def getUserMapFromPerforceServer(self):
         if self.userMapFromPerforceServer:
             return
@@ -862,26 +854,11 @@ class P4UserMap:
             self.users[output["User"]] = output["FullName"] + " <" + output["Email"] + ">"
             self.emails[output["Email"]] = output["User"]
 
-
         s = ''
         for (key, val) in self.users.items():
             s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
 
-        open(self.getUserCacheFilename(), "wb").write(s)
         self.userMapFromPerforceServer = True
-
-    def loadUserMapFromCache(self):
-        self.users = {}
-        self.userMapFromPerforceServer = False
-        try:
-            cache = open(self.getUserCacheFilename(), "rb")
-            lines = cache.readlines()
-            cache.close()
-            for line in lines:
-                entry = line.strip().split("\t")
-                self.users[entry[0]] = entry[1]
-        except IOError:
-            self.getUserMapFromPerforceServer()
 
 class P4Debug(Command):
     def __init__(self):
@@ -1875,7 +1852,6 @@ class P4Sync(Command, P4UserMap):
     delete_actions = ( "delete", "move/delete", "purge" )
 
     def __init__(self):
-        raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
         P4UserMap.__init__(self)
         self.options = [
@@ -2144,7 +2120,7 @@ class P4Sync(Command, P4UserMap):
         gitStream.write(description)
         gitStream.write("\n")
 
-    def commit(self, details, files, branch, parent = ""):
+    def commit(self, details, files, branch):
         raise NotImplementedError( "Adapt to Perforce" )
         assert branch is None # TODO remove this arg
         epoch = details["time"]
@@ -2182,11 +2158,6 @@ class P4Sync(Command, P4UserMap):
         if len(details['options']) > 0:
             self.gitStream.write(": options = %s" % details['options'])
         self.gitStream.write("]\nEOT\n\n")
-
-        if len(parent) > 0:
-            if self.verbose:
-                print "parent %s" % parent
-            self.gitStream.write("from %s\n" % parent)
 
         self.streamP4Files(new_files)
         self.gitStream.write("\n")
@@ -2257,29 +2228,6 @@ class P4Sync(Command, P4UserMap):
                 # ignore will need to be removed manually.
                 system(["git", "config", "--add", "git-p4.ignoredP4Labels", name])
 
-        # Perforce does not strictly require branches to be defined, so we also
-        # check git config for a branch list.
-        #
-        # Example of branch definition in git config file:
-        # [git-p4]
-        #   branchList=main:branchA
-        #   branchList=main:branchB
-        #   branchList=branchA:branchC
-        configBranches = gitConfigList("git-p4.branchList")
-        for branch in configBranches:
-            if branch:
-                (source, destination) = branch.split(":")
-                self.knownBranches[destination] = source
-
-                lostAndFoundBranches.discard(destination)
-
-                if source not in self.knownBranches:
-                    lostAndFoundBranches.add(source)
-
-
-        for branch in lostAndFoundBranches:
-            self.knownBranches[branch] = branch
-
     def updateOptionDict(self, d):
         # TODO remove
         option_keys = {} 
@@ -2340,12 +2288,11 @@ class P4Sync(Command, P4UserMap):
                 sys.stdout.flush()
             cnt = cnt + 1
 
+            continue # TODO remove
+
             try:
                 files = self.extractFilesFromCommit(description)
-                self.commit(description, files, None,
-                            self.initialParent)
-                # only needed once, to connect to the previous commit
-                self.initialParent = ""
+                self.commit(description, files, None)
             except IOError:
                 print self.gitError.read()
                 sys.exit(1)
@@ -2411,10 +2358,6 @@ class P4Sync(Command, P4UserMap):
     def run(self, args):
         self.changeRange = ""
 
-        # map from branch depot path to parent branch
-        self.knownBranches = {}
-        self.initialParents = {}
-
         self.refPrefix = "refs/remotes/p4/" # TODO remove
 
         # accept either the command-line option, or the configuration variable
@@ -2439,12 +2382,12 @@ class P4Sync(Command, P4UserMap):
 
         # TODO Make sure no revision specifiers are used when --changesfile
         # is specified.
+        if not self.changesFile:
+            # import the entire p4 tree, as per the clientspec, at the head revision
+            # TODO specify a revision
+            revision = "#head"
 
-        # import the entire p4 tree, as per the clientspec, at the head revision
-        # TODO specify a revision
-        revision = "#head"
-
-        self.loadUserMapFromCache()
+        self.getUserMapFromPerforceServer()
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
@@ -2485,13 +2428,6 @@ class P4Sync(Command, P4UserMap):
             else:
                 self.updatedBranches = set()
 
-                if args:
-                    # start a new branch
-                    self.initialParent = ""
-                else:
-                    # build on a previous revision
-                    self.initialParent = parseRevision(self.branch)
-
                 self.importChanges(changes)
 
                 if not self.silent:
@@ -2502,10 +2438,8 @@ class P4Sync(Command, P4UserMap):
                             sys.stdout.write("%s " % b)
                         sys.stdout.write("\n")
 
-        if gitConfigBool("git-p4.importLabels"):
-            self.importLabels = True
-
         if self.importLabels:
+            raise NotImplementedError( "TODO implement?" )
             p4Labels = getP4Labels(self.depotPaths)
             gitTags = getGitTags()
 
