@@ -197,13 +197,14 @@ class P4Repo:
         P4CONFIG file in place that specifies connection settings."""
         self.clientRoot = clientRoot
         self._version_string = None
+        self.userMapFromServer = False
 
         # Large clients can take a long time to parse, so cache the info
         self._clientOutput = self.cmdList("client -o")
         if len(self._clientOutput) != 1:
             die('Output from "client -o" is %d lines, expecting 1' % len(self._clientOutput))
 
-        server_cr = os.path.normcase(os.path.normpath(self._getClientRoot( )))
+        server_cr = os.path.normcase(os.path.normpath(self._clientOutput[0]["Root"]))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
         if server_cr != given_cr:
             die( "Perforce settings at %r do not match intended client" % clientRoot )
@@ -532,15 +533,42 @@ class P4Repo:
 
         return view
 
-    def _getClientRoot(self):
-        """Grab the client directory from the server.  Used to verify we've connected to the
-        right server/client."""
+    def userId(self):
+        if self.myUserId:
+            return self.myUserId
 
-        entry = self._clientOutput[0]
-        if "Root" not in entry:
-            die('Client has no "Root"')
+        results = self.cmdList("user -o")
+        for r in results:
+            if r.has_key('User'):
+                self.myUserId = r['User']
+                return r['User']
+        die("Could not find your p4 user id")
 
-        return entry["Root"]
+    def userIsMe(self, p4User):
+        # return True if the given p4 user is actually me
+        me = self.userId()
+        if not p4User or p4User != me:
+            return False
+        else:
+            return True
+
+    def getUserMapFromServer(self):
+        if self.userMapFromServer:
+            return
+        self.users = {}
+        self.emails = {}
+
+        for output in self.cmdList("users"):
+            if not output.has_key("User"):
+                continue
+            self.users[output["User"]] = output["FullName"] + " <" + output["Email"] + ">"
+            self.emails[output["Email"]] = output["User"]
+
+        s = ''
+        for (key, val) in self.users.items():
+            s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
+
+        self.userMapFromServer = True
 
 
 def extractSettingsGitLog(log):
@@ -614,48 +642,6 @@ class Command:
     def __init__(self):
         self.usage = "usage: %prog [options]"
         self.verbose = False
-
-class P4UserMap:
-    def __init__(self):
-        self.userMapFromPerforceServer = False
-        self.myP4UserId = None
-
-    def p4UserId(self):
-        if self.myP4UserId:
-            return self.myP4UserId
-
-        results = self.p4.cmdList("user -o")
-        for r in results:
-            if r.has_key('User'):
-                self.myP4UserId = r['User']
-                return r['User']
-        die("Could not find your p4 user id")
-
-    def p4UserIsMe(self, p4User):
-        # return True if the given p4 user is actually me
-        me = self.p4UserId()
-        if not p4User or p4User != me:
-            return False
-        else:
-            return True
-
-    def getUserMapFromPerforceServer(self):
-        if self.userMapFromPerforceServer:
-            return
-        self.users = {}
-        self.emails = {}
-
-        for output in self.p4.cmdList("users"):
-            if not output.has_key("User"):
-                continue
-            self.users[output["User"]] = output["FullName"] + " <" + output["Email"] + ">"
-            self.emails[output["Email"]] = output["User"]
-
-        s = ''
-        for (key, val) in self.users.items():
-            s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
-
-        self.userMapFromPerforceServer = True
 
 class P4Debug(Command):
     def __init__(self):
@@ -732,14 +718,13 @@ class P4RollBack(Command):
 
         return True
 
-class P4Submit(Command, P4UserMap):
+class P4Submit(Command):
 
     conflict_behavior_choices = ("ask", "skip", "quit")
 
     def __init__(self):
         raise NotImplementedError( "Adapt to Perforce" )
         Command.__init__(self)
-        P4UserMap.__init__(self)
         self.options = [
                 optparse.make_option("--origin", dest="origin"),
                 optparse.make_option("-M", dest="detectRenames", action="store_true"),
@@ -1374,8 +1359,7 @@ class P4Submit(Command, P4UserMap):
             sys.exit(128)
 
         self.clientSpec = False
-        if self.clientSpec:
-            self.clientSpecDirs = getClientSpec(self.clientSpec)
+        self.clientSpecDirs = getClientSpec(self.clientSpec)
 
         if self.clientSpec:
             # all files are relative to the client spec
@@ -1639,12 +1623,11 @@ class View(object):
            not be mapped in the client."""
         return self.client_spec_path_cache.get( depot_path, "" )
 
-class P4Sync(Command, P4UserMap):
+class P4Sync(Command):
     delete_actions = ( "delete", "move/delete", "purge" )
 
     def __init__(self):
         Command.__init__(self)
-        P4UserMap.__init__(self)
         self.options = [
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
@@ -1668,9 +1651,8 @@ class P4Sync(Command, P4UserMap):
 
         self.usage += " //depot/path[@revRange]"
         self.silent = False
-        self.p4 = None
+        self.repo0 = None
         self.createdBranches = set()
-        self.committedChanges = set()
         self.importLabels = False
         self.changesFile = ""
         self.maxChanges = ""
@@ -1683,12 +1665,10 @@ class P4Sync(Command, P4UserMap):
         while commit.has_key("depotFile%s" % fnum):
             path =  commit["depotFile%s" % fnum]
 
-            # if using a client spec, only consider files that have
-            # a path in the client
-            if self.clientSpecDirs:
-                if not self.clientSpecDirs.map_in_client(path):
-                    fnum = fnum + 1
-                    continue
+            # only consider files that have a path in the client
+            if not self.clientSpecDirs.map_in_client(path):
+                fnum = fnum + 1
+                continue
 
             file = {}
             file["path"] = path
@@ -1913,49 +1893,19 @@ class P4Sync(Command, P4UserMap):
         gitStream.write(description)
         gitStream.write("\n")
 
-    def commit(self, details, files, branch):
-        raise NotImplementedError( "Adapt to Perforce" )
-        assert branch is None # TODO remove this arg
+    def commitChange(self, details, files):
         epoch = details["time"]
         author = details["user"]
+        # TODO ensure the author is registered in repo1
 
         if self.verbose:
-            print "commit into %s" % branch
+            print "commit change %s" % details["change"]
 
-        # start with reading files; if that fails, we should not
-        # create a commit.
-        new_files = []
-        for f in files:
-            if [p for p in self.branchPrefixes if p4PathStartsWith(f['path'], p)]:
-                new_files.append (f)
-            else:
-                sys.stderr.write("Ignoring file outside of prefix: %s\n" % f['path'])
+        self.clientSpecDirs.update_client_spec_path_cache(files)
 
-        if self.clientSpecDirs:
-            self.clientSpecDirs.update_client_spec_path_cache(files)
+        self.streamP4Files(files)
 
-        self.gitStream.write("commit %s\n" % branch)
-#        gitStream.write("mark :%s\n" % details["change"])
-        self.committedChanges.add(int(details["change"]))
-        committer = ""
-        if author not in self.users:
-            self.getUserMapFromPerforceServer()
-        committer = "%s %s %s" % (self.make_email(author), epoch, self.tz)
-
-        self.gitStream.write("committer %s\n" % committer)
-
-        self.gitStream.write("data <<EOT\n")
-        self.gitStream.write(details["desc"])
-        self.gitStream.write("\n[git-p4: depot-paths = \"%s\": change = %s" %
-                             (','.join(self.branchPrefixes), details["change"]))
-        if len(details['options']) > 0:
-            self.gitStream.write(": options = %s" % details['options'])
-        self.gitStream.write("]\nEOT\n\n")
-
-        self.streamP4Files(new_files)
-        self.gitStream.write("\n")
-
-        change = int(details["change"])
+        raise NotImplementedError( "TODO create the changelist and submit" )
 
     # Import p4 labels as git tags. A direct mapping does not
     # exist, so assume that if all the files are at the same revision
@@ -2073,7 +2023,7 @@ class P4Sync(Command, P4UserMap):
     def importChanges(self, changes):
         cnt = 1
         for change in changes:
-            description = self.p4.describe(change)
+            description = self.repo0.describe(change)
             self.updateOptionDict(description)
 
             if not self.silent:
@@ -2084,7 +2034,7 @@ class P4Sync(Command, P4UserMap):
 
             try:
                 files = self.extractFilesFromCommit(description)
-                self.commit(description, files, None)
+                self.commitChange(description, files)
             except IOError:
                 print self.gitError.read()
                 sys.exit(1)
@@ -2141,7 +2091,7 @@ class P4Sync(Command, P4UserMap):
 
         self.updateOptionDict(details)
         try:
-            self.commit(details, self.extractFilesFromCommit(details))
+            self.commitChange(details, self.extractFilesFromCommit(details))
         except IOError:
             print "IO error with git fast-import. Is your git version recent enough?"
             print self.gitError.read()
@@ -2153,8 +2103,9 @@ class P4Sync(Command, P4UserMap):
 
         # TODO A mandatory option is a contradiction in terms
         if not self.clientRoot: die( "Must supply --repo0-client-root" )
-        self.p4 = P4Repo(self.clientRoot)
-        self.clientSpecDirs = self.p4.getClientSpec()
+        self.repo0 = P4Repo(self.clientRoot)
+        self.repo0.getUserMapFromServer()
+        self.clientSpecDirs = self.repo0.getClientSpec()
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
@@ -2178,8 +2129,6 @@ class P4Sync(Command, P4UserMap):
             # import the entire p4 tree, as per the clientspec, at the head revision
             # TODO specify a revision
             revision = "#head"
-
-        self.getUserMapFromPerforceServer()
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
