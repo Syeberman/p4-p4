@@ -198,6 +198,11 @@ class P4Repo:
         self.clientRoot = clientRoot
         self._version_string = None
 
+        # Large clients can take a long time to parse, so cache the info
+        self._clientOutput = self.cmdList("client -o")
+        if len(self._clientOutput) != 1:
+            die('Output from "client -o" is %d lines, expecting 1' % len(self._clientOutput))
+
         server_cr = os.path.normcase(os.path.normpath(self._getClientRoot( )))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
         if server_cr != given_cr:
@@ -509,13 +514,8 @@ class P4Repo:
         """Look at the p4 client spec, create a View() object that contains
         all the mappings, and return it."""
 
-        specList = self.cmdList("client -o ")
-        if len(specList) != 1:
-            die('Output from "client -o" is %d lines, expecting 1' %
-                len(specList))
-
         # dictionary of all client parameters
-        entry = specList[0]
+        entry = self._clientOutput[0]
 
         # just the keys that start with "View"
         view_keys = [ k for k in entry.keys() if k.startswith("View") ]
@@ -536,11 +536,7 @@ class P4Repo:
         """Grab the client directory from the server.  Used to verify we've connected to the
         right server/client."""
 
-        output = self.cmdList("client -o")
-        if len(output) != 1:
-            die('Output from "client -o" is %d lines, expecting 1' % len(output))
-
-        entry = output[0]
+        entry = self._clientOutput[0]
         if "Root" not in entry:
             die('Client has no "Root"')
 
@@ -1641,12 +1637,7 @@ class View(object):
         """Return the relative location in the client where this
            depot file should live.  Returns "" if the file should
            not be mapped in the client."""
-
-        if depot_path in self.client_spec_path_cache:
-            return self.client_spec_path_cache[depot_path]
-
-        die( "Error: %s is not found in client spec path" % depot_path )
-        return ""
+        return self.client_spec_path_cache.get( depot_path, "" )
 
 class P4Sync(Command, P4UserMap):
     delete_actions = ( "delete", "move/delete", "purge" )
@@ -1687,7 +1678,6 @@ class P4Sync(Command, P4UserMap):
         self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
-        raise NotImplementedError( "Pull in source information so integrate is done correctly" )
         files = []
         fnum = 0
         while commit.has_key("depotFile%s" % fnum):
@@ -2091,8 +2081,6 @@ class P4Sync(Command, P4UserMap):
                 #sys.stdout.write("%s\n" % (" ".join( description["desc"].split( ) ))[:78] )
                 sys.stdout.flush()
             cnt = cnt + 1
-
-            continue # TODO remove
 
             try:
                 files = self.extractFilesFromCommit(description)
