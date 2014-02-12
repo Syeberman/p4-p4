@@ -14,10 +14,10 @@
 #    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 #    copies of the Software, and to permit persons to whom the Software is
 #    furnished to do so, subject to the following conditions:
-#   
+#
 #   The above copyright notice and this permission notice shall be included in
 #    all copies or substantial portions of the Software.
-#   
+#
 #   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 #    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 #    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -189,21 +189,26 @@ def p4_keywords_regexp_for_file(file):
         return p4_keywords_regexp_for_type(type_base, type_mods)
 
 
-
 class P4Repo:
     """Represents a particular connection to a Perforce server."""
     def __init__(self, clientRoot):
         """Connects to the Perforce server/client at the given client root.  Assumes there's a
         P4CONFIG file in place that specifies connection settings."""
-        self.clientRoot = clientRoot
+        self.clientRoot = os.path.abspath(clientRoot)
         self._version_string = None
-        self.userMapFromServer = False
+
+        # Cache the results of certain operations to improve the dev/test cycle
+        # FIXME remove for release?
+        self.cacheDir = os.path.join(clientRoot, ".p4-p4-cache")
+        if os.path.exists(self.cacheDir):
+            if verbose: print "Using cached server information at %r" % self.cacheDir
 
         # Large clients can take a long time to parse, so cache the info
-        self._clientOutput = self.cmdList("client -o")
+        self._clientOutput = self.cmdList("client -o", cache_name="client")
         if len(self._clientOutput) != 1:
             die('Output from "client -o" is %d lines, expecting 1' % len(self._clientOutput))
 
+        # Check that the client settings appear correct, then create the client cache if needed
         server_cr = os.path.normcase(os.path.normpath(self._clientOutput[0]["Root"]))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
         if server_cr != given_cr:
@@ -343,7 +348,9 @@ class P4Repo:
         the presence of field "time".  Return a dict of the
         results."""
 
-        ds = self.cmdList(["describe", "-s", str(change)])
+        # Change descriptions don't often change, so cache them
+        cache_name = os.path.join("describe", str(change))
+        ds = self.cmdList(["describe", "-s", str(change)], cache_name=cache_name)
         if len(ds) != 1:
             die("p4 describe -s %d did not return 1 result: %s" % (change, str(ds)))
 
@@ -405,7 +412,15 @@ class P4Repo:
 
         return labels
 
-    def cmdList(self, cmd, stdin=None, stdin_mode='w+b', cb=None):
+    def cmdList(self, cmd, stdin=None, stdin_mode='w+b', cb=None, cache_name=None):
+        """If cache_name is given ('client', say), a .py.marshal file is created in self.cacheDir
+        to cache the results of the operation, and used on subsequent calls instead of going direct
+        to Perforce.  This is intended to improve the dev/test cycle, and may be removed."""
+        if cache_name:
+            cache_path = os.path.join(self.cacheDir, cache_name+".py.marshal")
+            if os.path.exists(cache_path):
+                with open(cache_path, "rb") as infile:
+                    return marshal.load(infile)
 
         if isinstance(cmd,basestring):
             cmd = "-G " + cmd
@@ -452,6 +467,12 @@ class P4Repo:
             entry = {}
             entry["p4ExitCode"] = exitCode
             result.append(entry)
+
+        if cache_name:
+            try: os.makedirs(os.path.dirname(cache_path))
+            except OSError: pass
+            with open(cache_path, "wb") as outfile:
+                marshal.dump(result, outfile)
 
         return result
 
@@ -552,13 +573,12 @@ class P4Repo:
         else:
             return True
 
-    def getUserMapFromServer(self):
-        if self.userMapFromServer:
-            return
+    def buildUserMap(self, cache_name=None):
+        if hasattr(self, "users"): return
         self.users = {}
         self.emails = {}
 
-        for output in self.cmdList("users"):
+        for output in self.cmdList("users", cache_name=cache_name):
             if not output.has_key("User"):
                 continue
             self.users[output["User"]] = output["FullName"] + " <" + output["Email"] + ">"
@@ -567,8 +587,6 @@ class P4Repo:
         s = ''
         for (key, val) in self.users.items():
             s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
-
-        self.userMapFromServer = True
 
 
 def extractSettingsGitLog(log):
@@ -1639,7 +1657,7 @@ class P4Sync(Command):
                                      "P4CONFIG for repo0 server; only files included in Client Spec "
                                      "are synced")
         ]
-        # XXX Note the terminology!  The primary direction of changes is repo0->repo1, but 
+        # XXX Note the terminology!  The primary direction of changes is repo0->repo1, but
         # P4Submit moves individual changes from repo1->repo0.
         self.description = """Imports from one Perforce repo (repo0) into another (repo1).\n
     example:
@@ -1854,12 +1872,6 @@ class P4Sync(Command):
             if self.stream_file.has_key('depotFile'):
                 self.streamOneP4File(self.stream_file, self.stream_contents)
 
-    def make_email(self, userid):
-        if userid in self.users:
-            return self.users[userid]
-        else:
-            return "%s <a@b>" % userid
-
     # Stream a p4 tag
     def streamTag(self, gitStream, labelName, labelDetails, commit, epoch):
         raise NotImplementedError( "Adapt to Perforce" )
@@ -1973,7 +1985,7 @@ class P4Sync(Command):
 
     def updateOptionDict(self, d):
         # TODO remove
-        option_keys = {} 
+        option_keys = {}
         d["options"] = ' '.join(sorted(option_keys.keys()))
 
     def gitRefForBranch(self, branch):
@@ -2103,8 +2115,9 @@ class P4Sync(Command):
 
         # TODO A mandatory option is a contradiction in terms
         if not self.clientRoot: die( "Must supply --repo0-client-root" )
+        if not os.path.exists(self.clientRoot): die("--repo0-client-root must exist")
         self.repo0 = P4Repo(self.clientRoot)
-        self.repo0.getUserMapFromServer()
+        self.repo0.buildUserMap(cache_name="users")
         self.clientSpecDirs = self.repo0.getClientSpec()
 
         # TODO: should always look at previous commits,
@@ -2121,7 +2134,6 @@ class P4Sync(Command):
             sys.exit(1)
 
         revision = ""
-        self.users = {}
 
         # TODO Make sure no revision specifiers are used when --changesfile
         # is specified.
