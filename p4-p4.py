@@ -543,7 +543,7 @@ class P4Repo:
         view_keys = [ k for k in entry.keys() if k.startswith("View") ]
 
         # hold this new View
-        view = View(entry["Client"])
+        view = View()
 
         # append the lines, in order, to the view
         for view_num in range(len(view_keys)):
@@ -587,6 +587,44 @@ class P4Repo:
         s = ''
         for (key, val) in self.users.items():
             s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
+
+    def _convert_client_path(self, client_prefix, clientFile):
+        # chop off //client/ part to make it relative
+        if not clientFile.startswith(client_prefix):
+            die("No prefix '%s' on clientFile '%s'" %
+                (client_prefix, clientFile))
+        return clientFile[len(client_prefix):]
+
+    def update_client_spec_path_cache(self):
+        """ Caching file paths by "p4 fstat" batch query """
+        if hasattr(self, "client_spec_path_cache"): return
+
+        # cache results of "p4 fstat" to lookup client file locations
+        self.client_spec_path_cache = {}
+        client_name = self._clientOutput[0]["Client"]
+        client_prefix = "//%s/" % client_name
+
+        # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
+        # are mapped in this client view (-Rc)
+        fstat_result = self.cmdList(["fstat", "-T", "depotFile clientFile", "-Op", "-Rc", "//..."],
+                cache_name="client-fstat-where")
+        for res in fstat_result:
+            if "code" in res and res["code"] == "error":
+                # assume error is "... file(s) not in client view"
+                continue
+            if "clientFile" not in res:
+                die("No clientFile in 'p4 fstat' output")
+            if "unmap" in res:
+                # it will list all of them, but only one not unmap-ped
+                continue
+            self.client_spec_path_cache[res['depotFile']] = \
+                    self._convert_client_path(client_prefix, res["clientFile"])
+
+    def map_in_client(self, depot_path):
+        """Return the relative location in the client where this
+           depot file should live.  Returns "" if the file should
+           not be mapped in the client."""
+        return self.client_spec_path_cache.get( depot_path, "" )
 
 
 def extractSettingsGitLog(log):
@@ -1377,7 +1415,6 @@ class P4Submit(Command):
             sys.exit(128)
 
         self.clientSpec = False
-        self.clientSpecDirs = getClientSpec(self.clientSpec)
 
         if self.clientSpec:
             # all files are relative to the client spec
@@ -1552,11 +1589,8 @@ class View(object):
     """Represent a p4 view ("p4 help views"), and map files in a
        repo according to the view."""
 
-    def __init__(self, client_name):
+    def __init__(self):
         self.mappings = []
-        self.client_prefix = "//%s/" % client_name
-        # cache results of "p4 where" to lookup client file locations
-        self.client_spec_path_cache = {}
 
     def append(self, view_line):
         """Parse a view line, splitting it into depot and client
@@ -1602,44 +1636,6 @@ class View(object):
         if not exclude:
             self.mappings.append(depot_side)
 
-    def convert_client_path(self, clientFile):
-        # chop off //client/ part to make it relative
-        if not clientFile.startswith(self.client_prefix):
-            die("No prefix '%s' on clientFile '%s'" %
-                (self.client_prefix, clientFile))
-        return clientFile[len(self.client_prefix):]
-
-    def update_client_spec_path_cache(self, files):
-        """ Caching file paths by "p4 where" batch query """
-
-        # List depot file paths exclude that already cached
-        fileArgs = [f['path'] for f in files if f['path'] not in self.client_spec_path_cache]
-
-        if len(fileArgs) == 0:
-            return  # All files in cache
-
-        where_result = p4CmdList(["-x", "-", "where"], stdin=fileArgs)
-        for res in where_result:
-            if "code" in res and res["code"] == "error":
-                # assume error is "... file(s) not in client view"
-                continue
-            if "clientFile" not in res:
-                die("No clientFile in 'p4 where' output")
-            if "unmap" in res:
-                # it will list all of them, but only one not unmap-ped
-                continue
-            self.client_spec_path_cache[res['depotFile']] = self.convert_client_path(res["clientFile"])
-
-        # not found files or unmap files set to ""
-        for depotFile in fileArgs:
-            if depotFile not in self.client_spec_path_cache:
-                self.client_spec_path_cache[depotFile] = ""
-
-    def map_in_client(self, depot_path):
-        """Return the relative location in the client where this
-           depot file should live.  Returns "" if the file should
-           not be mapped in the client."""
-        return self.client_spec_path_cache.get( depot_path, "" )
 
 class P4Sync(Command):
     delete_actions = ( "delete", "move/delete", "purge" )
@@ -1675,7 +1671,6 @@ class P4Sync(Command):
         self.changesFile = ""
         self.maxChanges = ""
         self.clientRoot = False
-        self.clientSpecDirs = None
 
     def extractFilesFromCommit(self, commit):
         files = []
@@ -1684,7 +1679,7 @@ class P4Sync(Command):
             path =  commit["depotFile%s" % fnum]
 
             # only consider files that have a path in the client
-            if not self.clientSpecDirs.map_in_client(path):
+            if not self.repo0.map_in_client(path):
                 fnum = fnum + 1
                 continue
 
@@ -1835,14 +1830,14 @@ class P4Sync(Command):
 
         self.stream_have_file_info = True
 
-    # Stream directly from "p4 files" into "git fast-import"
     def streamP4Files(self, files):
-        raise NotImplementedError( "Adapt to Perforce" )
+        """Stream directly from "p4 files" into "p4 edit", etc"""
         filesForCommit = []
         filesToRead = []
         filesToDelete = []
 
         for f in files:
+            print f['action'], f['path'], f['rev']
             filesForCommit.append(f)
             if f['action'] in self.delete_actions:
                 filesToDelete.append(f)
@@ -1858,15 +1853,11 @@ class P4Sync(Command):
             self.stream_contents = []
             self.stream_have_file_info = False
 
-            # curry self argument
-            def streamP4FilesCbSelf(entry):
-                self.streamP4FilesCb(entry)
-
             fileArgs = ['%s#%s' % (f['path'], f['rev']) for f in filesToRead]
 
-            p4CmdList(["-x", "-", "print"],
+            self.repo0.cmdList(["-x", "-", "print"],
                       stdin=fileArgs,
-                      cb=streamP4FilesCbSelf)
+                      cb=self.streamP4FilesCb)
 
             # do the last chunk
             if self.stream_file.has_key('depotFile'):
@@ -1912,9 +1903,6 @@ class P4Sync(Command):
 
         if self.verbose:
             print "commit change %s" % details["change"]
-
-        self.clientSpecDirs.update_client_spec_path_cache(files)
-
         self.streamP4Files(files)
 
         raise NotImplementedError( "TODO create the changelist and submit" )
@@ -2118,7 +2106,7 @@ class P4Sync(Command):
         if not os.path.exists(self.clientRoot): die("--repo0-client-root must exist")
         self.repo0 = P4Repo(self.clientRoot)
         self.repo0.buildUserMap(cache_name="users")
-        self.clientSpecDirs = self.repo0.getClientSpec()
+        self.repo0.update_client_spec_path_cache()
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
