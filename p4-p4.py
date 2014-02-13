@@ -1696,28 +1696,18 @@ class P4Sync(Command):
             fnum = fnum + 1
         return files
 
-    def stripRepoPath(self, path, prefixes):
-        """When streaming files, this is called to map a repo0 path
-           to where it should go in repo1."""
-        # TODO Use this
-        path = wildcard_decode(path)
-        return path
-
     # output one file from the P4 stream
     # - helper for streamP4Files
     def streamOneP4File(self, file, contents):
-        raise NotImplementedError( "Adapt to Perforce" )
-        relPath = self.stripRepoPath(file['depotFile'], self.branchPrefixes)
+        relPath = self.repo0.map_in_client(file['depotFile'])
+        assert relPath, "expected path in client"
         if verbose:
             sys.stderr.write("%s\n" % relPath)
+        hostPath = os.path.join(self.repo1.clientRoot, relPath)
 
         (type_base, type_mods) = split_p4_type(file["type"])
 
-        git_mode = "100644"
-        if "x" in type_mods:
-            git_mode = "100755"
         if type_base == "symlink":
-            git_mode = "120000"
             # p4 print on a symlink sometimes contains "target\n";
             # if it does, remove the newline
             data = ''.join(contents)
@@ -1744,8 +1734,9 @@ class P4Sync(Command):
             # them back too.  This is not needed to the cygwin windows version,
             # just the native "NT" type.
             #
-            text = p4_read_pipe(['print', '-q', '-o', '-', file['depotFile']])
-            if p4_version_string().find("/NT") >= 0:
+            text = self.repo0.read_pipe(['print', '-q', '-o', '-', file['depotFile']])
+            # FIXME verify this mangling
+            if self.repo0.version_string().find("/NT") >= 0:
                 text = text.replace("\r\n", "\n")
             contents = [ text ]
 
@@ -1771,17 +1762,12 @@ class P4Sync(Command):
             text = regexp.sub(r'$\1$', text)
             contents = [ text ]
 
-        self.gitStream.write("M %s inline %s\n" % (git_mode, relPath))
+        try: os.makedirs(os.path.dirname(hostPath))
+        except: pass
 
-        # total length...
-        length = 0
-        for d in contents:
-            length = length + len(d)
-
-        self.gitStream.write("data %d\n" % length)
-        for d in contents:
-            self.gitStream.write(d)
-        self.gitStream.write("\n")
+        # FIXME import original filetype
+        with open(hostPath, "wb") as outfile:
+            for d in contents: outfile.write(d)
 
     def streamOneP4Deletion(self, file):
         raise NotImplementedError( "Adapt to Perforce" )
