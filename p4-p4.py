@@ -207,11 +207,15 @@ class P4Repo:
             die('Output from "info" is %d lines, expecting 1' % len(infoList))
         self.info = infoList[0]
 
-        # Check that the client settings appear correct, then create the client cache if needed
+        # Check that the client settings appear correct, then create the client cache if needed.
+        # Perforce sets clientName to *unknown* if the client doesn't exist.
+        unknown = "*unknown*"
+        if self.info.get("clientName", unknown) == unknown:
+            die("unknown client for %r"% clientRoot)
         server_cr = os.path.normcase(os.path.normpath(self.info["clientRoot"]))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
         if server_cr != given_cr:
-            die( "Perforce settings at %r do not match intended client" % clientRoot )
+            die("Perforce settings at %r do not match intended client" % clientRoot)
 
     def build_cmd(self, cmd):
         """Build a suitable p4 command line.
@@ -531,15 +535,20 @@ class P4Repo:
         changelist.sort()
         return changelist
 
-    def getClientSpec(self):
-        """Look at the p4 client spec, create a View() object that contains
-        all the mappings, and return it."""
-
-        # Large clients can take a long time to get, so cache the info
-        clientOutput = self.cmdList("client -o", cache_name="client")
+    def getClient(self, cache_name=None):
+        # Large clients can take a long time to parse, so cache the info
+        try: return self._client
+        except AttributeError: pass
+        clientOutput = self.cmdList("client -o", cache_name=cache_name)
         if len(clientOutput) != 1:
             die('Output from "client -o" is %d lines, expecting 1' % len(clientOutput))
-        entry = clientOutput[0]
+        self._client = clientOutput[0]
+        return self._client
+
+    def getClientView(self):
+        """Look at the p4 client spec, create a View() object that contains
+        all the mappings, and return it."""
+        entry = self.getClient(cache_name="client")
 
         # just the keys that start with "View"
         view_keys = [ k for k in entry.keys() if k.startswith("View") ]
@@ -1649,26 +1658,15 @@ class P4Sync(Command):
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
-                # TODO require a client root, given on command line
-                optparse.make_option("--repo0-client-root", dest="repo0_clientRoot",
-                                     help="Run repo0 commands from this directory, which must have "
-                                     "P4CONFIG for repo0 server; only files included in Client Spec "
-                                     "are synced"),
-                optparse.make_option("--repo1-client-root", dest="repo1_clientRoot",
-                                     help="Run repo1 commands from this directory, which must have "
-                                     "P4CONFIG for repo0 server; must have admin access"),
         ]
         # XXX Note the terminology!  The primary direction of changes is repo0->repo1, but
         # P4Submit moves individual changes from repo1->repo0.
-        self.description = """Imports from one Perforce repo (repo0) into another (repo1).\n
-    example:
-    //depot/my/project/ -- to import the current head
-    //depot/my/project/@all -- to import everything
-    //depot/my/project/@1,6 -- to import only from revision 1 to 6
+        self.description = "Imports from one Perforce repo (repo0) into another (repo1).  " \
+                "P4CONFIG files must exist at each client's root to specify connection settings.  " \
+                "Only files mapped by repo0's client spec are imported.  You must have admin " \
+                "access to repo1."
 
-    (a ... is not needed in the path p4 specification, it's added implicitly)"""
-
-        self.usage += " //depot/path[@revRange]"
+        self.usage += " <repo0-client-root> <repo1-client-root>"
         self.silent = False
         self.repo0 = None
         self.createdBranches = set()
@@ -2095,36 +2093,36 @@ class P4Sync(Command):
 
 
     def run(self, args):
+        if not len(args) == 2: die("exactly two arguments required")
+        self.repo0_clientRoot, self.repo1_clientRoot = args
         self.changeRange = ""
-        self.refPrefix = "refs/remotes/p4/" # TODO remove
 
         # TODO A mandatory option is a contradiction in terms
-        if not self.repo0_clientRoot: die( "Must supply --repo0-client-root" )
+        if not self.repo0_clientRoot: die("Must supply --repo0-client-root")
         if not os.path.exists(self.repo0_clientRoot): die("--repo0-client-root must exist")
         self.repo0 = P4Repo(self.repo0_clientRoot)
         self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
 
         # TODO A mandatory option is a contradiction in terms
-        #if not self.repo1_clientRoot: die( "Must supply --repo1-client-root" )
-        #if not os.path.exists(self.repo1_clientRoot): die("--repo1-client-root must exist")
-        #self.repo1 = P4Repo(self.repo1_clientRoot)
-        #self.repo1.buildUserMap() # do not cached to disk, because we will change it
+        if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
+        if not os.path.exists(self.repo1_clientRoot): die("--repo1-client-root must exist")
+        self.repo1 = P4Repo(self.repo1_clientRoot)
+        self.repo1.buildUserMap() # do not cached to disk, because we will change it
 
-        # TODO Sanity checks
+        # Sanity checks
+        if self.repo0.info["serverAddress"] == self.repo1.info["serverAddress"]:
+            die("repo0 and repo1 can't be the same server")
+        if self.repo1.getClient()["LineEnd"] != "unix":
+            die("repo1's client must have 'LineEnd: unix'")
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
-        if not args:
-            p4Change = 0 # FIXME set to last-imported-change + 1
-            if p4Change > 0:
-                self.changeRange = "@%s,#head" % p4Change
-                if not self.silent:
-                    print "Performing incremental import"
-
-        if args:
-            print "Import paths must come from a clientspec, currently."
-            sys.exit(1)
+        p4Change = 0 # FIXME set to last-imported-change + 1
+        if p4Change > 0:
+            self.changeRange = "@%s,#head" % p4Change
+            if not self.silent:
+                print "Performing incremental import"
 
         revision = ""
 
