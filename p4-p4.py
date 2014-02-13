@@ -202,14 +202,13 @@ class P4Repo:
         self.cacheDir = os.path.join(clientRoot, ".p4-p4-cache")
         if os.path.exists(self.cacheDir):
             if verbose: print "Using cached server information at %r" % self.cacheDir
-
-        # Large clients can take a long time to parse, so cache the info
-        self._clientOutput = self.cmdList("client -o", cache_name="client")
-        if len(self._clientOutput) != 1:
-            die('Output from "client -o" is %d lines, expecting 1' % len(self._clientOutput))
+        infoList = self.cmdList("info")
+        if len(infoList) != 1:
+            die('Output from "info" is %d lines, expecting 1' % len(infoList))
+        self.info = infoList[0]
 
         # Check that the client settings appear correct, then create the client cache if needed
-        server_cr = os.path.normcase(os.path.normpath(self._clientOutput[0]["Root"]))
+        server_cr = os.path.normcase(os.path.normpath(self.info["clientRoot"]))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
         if server_cr != given_cr:
             die( "Perforce settings at %r do not match intended client" % clientRoot )
@@ -536,8 +535,11 @@ class P4Repo:
         """Look at the p4 client spec, create a View() object that contains
         all the mappings, and return it."""
 
-        # dictionary of all client parameters
-        entry = self._clientOutput[0]
+        # Large clients can take a long time to get, so cache the info
+        clientOutput = self.cmdList("client -o", cache_name="client")
+        if len(clientOutput) != 1:
+            die('Output from "client -o" is %d lines, expecting 1' % len(clientOutput))
+        entry = clientOutput[0]
 
         # just the keys that start with "View"
         view_keys = [ k for k in entry.keys() if k.startswith("View") ]
@@ -601,7 +603,7 @@ class P4Repo:
 
         # cache results of "p4 fstat" to lookup client file locations
         self.client_spec_path_cache = {}
-        client_name = self._clientOutput[0]["Client"]
+        client_name = self.info["clientName"]
         client_prefix = "//%s/" % client_name
 
         # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
@@ -1648,10 +1650,13 @@ class P4Sync(Command):
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
                 # TODO require a client root, given on command line
-                optparse.make_option("--repo0-client-root", dest="clientRoot",
+                optparse.make_option("--repo0-client-root", dest="repo0_clientRoot",
                                      help="Run repo0 commands from this directory, which must have "
                                      "P4CONFIG for repo0 server; only files included in Client Spec "
-                                     "are synced")
+                                     "are synced"),
+                optparse.make_option("--repo1-client-root", dest="repo1_clientRoot",
+                                     help="Run repo1 commands from this directory, which must have "
+                                     "P4CONFIG for repo0 server; must have admin access"),
         ]
         # XXX Note the terminology!  The primary direction of changes is repo0->repo1, but
         # P4Submit moves individual changes from repo1->repo0.
@@ -1670,7 +1675,8 @@ class P4Sync(Command):
         self.importLabels = False
         self.changesFile = ""
         self.maxChanges = ""
-        self.clientRoot = False
+        self.repo0_clientRoot = False
+        self.repo1_clientRoot = False
 
     def extractFilesFromCommit(self, commit):
         files = []
@@ -1788,8 +1794,6 @@ class P4Sync(Command):
 
     # handle another chunk of streaming data
     def streamP4FilesCb(self, marshalled):
-        raise NotImplementedError( "Adapt to Perforce" )
-
         # catch p4 errors and complain
         err = None
         if "code" in marshalled:
@@ -1801,13 +1805,6 @@ class P4Sync(Command):
             if self.stream_have_file_info:
                 if "depotFile" in self.stream_file:
                     f = self.stream_file["depotFile"]
-            # force a failure in fast-import, else an empty
-            # commit will be made
-            self.gitStream.write("\n")
-            self.gitStream.write("die-now\n")
-            self.gitStream.close()
-            # ignore errors, but make sure it exits first
-            self.importProcess.wait()
             if f:
                 die("Error from p4 print for %s: %s" % (f, err))
             else:
@@ -2102,11 +2099,19 @@ class P4Sync(Command):
         self.refPrefix = "refs/remotes/p4/" # TODO remove
 
         # TODO A mandatory option is a contradiction in terms
-        if not self.clientRoot: die( "Must supply --repo0-client-root" )
-        if not os.path.exists(self.clientRoot): die("--repo0-client-root must exist")
-        self.repo0 = P4Repo(self.clientRoot)
+        if not self.repo0_clientRoot: die( "Must supply --repo0-client-root" )
+        if not os.path.exists(self.repo0_clientRoot): die("--repo0-client-root must exist")
+        self.repo0 = P4Repo(self.repo0_clientRoot)
         self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
+
+        # TODO A mandatory option is a contradiction in terms
+        #if not self.repo1_clientRoot: die( "Must supply --repo1-client-root" )
+        #if not os.path.exists(self.repo1_clientRoot): die("--repo1-client-root must exist")
+        #self.repo1 = P4Repo(self.repo1_clientRoot)
+        #self.repo1.buildUserMap() # do not cached to disk, because we will change it
+
+        # TODO Sanity checks
 
         # TODO: should always look at previous commits,
         # merge with previous imports, if possible.
@@ -2131,12 +2136,6 @@ class P4Sync(Command):
             revision = "#head"
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
-
-        # TODO Replace with versions for p4-as-dest
-        self.importProcess = None
-        self.gitOutput = None
-        self.gitStream = None
-        self.gitError = None
 
         if revision:
             self.importHeadRevision(revision)
@@ -2186,12 +2185,6 @@ class P4Sync(Command):
 
             missingP4Labels = p4Labels - gitTags
             self.importP4Labels(self.gitStream, missingP4Labels)
-
-        self.gitStream.close()
-        if self.importProcess.wait() != 0:
-            die("fast-import failed: %s" % self.gitError.read())
-        self.gitOutput.close()
-        self.gitError.close()
 
         return True
 
