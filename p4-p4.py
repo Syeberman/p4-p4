@@ -188,6 +188,50 @@ def p4_keywords_regexp_for_file(file):
         (type_base, type_mods) = split_p4_type(p4_type(file))
         return p4_keywords_regexp_for_type(type_base, type_mods)
 
+class P4DictUnflattener:
+    """You'd expect Perforce to represent things like, say, revision history, like this:
+        {"depotFile": "//depot/test", [{"rev": 1, "change": 15}, {"rev": 2, "change": 301}]}
+    But it actually flattens this all into a single dict, adding subscripts to key names:
+        {"depotFile": "//depot/test", "rev0": 1, "change0": 15, "rev1": 2, "change1": 301}
+    This class makes accessing these values a little easier by providing a minimal list- and dict-
+    interface for the "elements" of the "list":
+        for elem in P4DictUnflattener(d, "rev"): # stop iterating when "rev%s"%i doesn't exist
+            print elem["change"]                 # automatically translates to "change%s"%i
+
+    To complicate even further, the "values" of the "elements" of the "list" can be "lists" too.
+    P4DictUnflattener accepts P4DictUnflattener elements to deal with these sub-lists:
+        for elem in P4DictUnflattener(d, "rev"):
+            for sub_elem in P4DictUnflattener(elem, "how"):
+                print sub_elem["how"], sub_elem["file"] # ie "how%s,%s"%(i,j)
+    """
+    def __init__(self, p4Dict, canary):
+        if isinstance(p4Dict, P4DictUnflattener.Element):
+            self.p4Dict = p4Dict.p4Dict
+            self.suffix = p4Dict.suffix+","
+        elif isinstance(p4Dict, dict):
+            self.p4Dict = p4Dict
+            self.suffix = ""
+        else:
+            raise TypeError
+        self.canary = canary
+    def __iter__(self):
+        i = 0
+        while True:
+            sub_suffix = self.suffix+str(i)
+            if self.canary+sub_suffix not in self.p4Dict: break
+            yield P4DictUnflattener.Element(self.p4Dict, sub_suffix)
+            i += 1
+
+    class Element:
+        """For use via P4DictUnflattener."""
+        def __init__(self, p4Dict, suffix):
+            self.p4Dict = p4Dict
+            self.suffix = suffix
+        def __getitem__(self, key):
+            return self.p4Dict[key+self.suffix]
+        def get(self, key, default=None):
+            return self.p4Dict.get(key+self.suffix, default)
+
 
 class P4Repo:
     """Represents a particular connection to a Perforce server."""
@@ -420,6 +464,7 @@ class P4Repo:
         to cache the results of the operation, and used on subsequent calls instead of going direct
         to Perforce.  This is intended to improve the dev/test cycle, and may be removed."""
         if cache_name:
+            assert not cb
             cache_path = os.path.join(self.cacheDir, cache_name+".py.marshal")
             if os.path.exists(cache_path):
                 with open(cache_path, "rb") as infile:
@@ -550,18 +595,12 @@ class P4Repo:
         all the mappings, and return it."""
         entry = self.getClient(cache_name="client")
 
-        # just the keys that start with "View"
-        view_keys = [ k for k in entry.keys() if k.startswith("View") ]
-
         # hold this new View
         view = View()
 
         # append the lines, in order, to the view
-        for view_num in range(len(view_keys)):
-            k = "View%d" % view_num
-            if k not in view_keys:
-                die("Expected view key %s missing" % k)
-            view.append(entry[k])
+        for elem in P4DictUnflattener(entry, "View"):
+            view.append(elem["View"])
 
         return view
 
@@ -635,7 +674,39 @@ class P4Repo:
         """Return the relative location in the client where this
            depot file should live.  Returns "" if the file should
            not be mapped in the client."""
-        return self.client_spec_path_cache.get( depot_path, "" )
+        return self.client_spec_path_cache.get(depot_path, "")
+
+    def update_client_filelog_cache(self, depot_path):
+        """Update the cache with contributory file history of the given file."""
+        # Mapping of change number to file name to file revision details
+        if not hasattr(self, "client_filelog_cache"):
+            self.client_filelog_cache = {}
+
+        # "filelog -1s" to get exact contributory integration history of the given path
+        # TODO If we could do this in a fast-ish batch command for all files mapped to the client,
+        # then we could remove the need for --changesfile
+        filelog_result = self.cmdList(["filelog", "-1s", depot_path])
+        if len(filelog_result) != 1:
+            die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
+        filelog_info = filelog_result[0]
+        for rev_info in P4DictUnflattener(filelog_info, "rev"):
+            change_cache = self.client_filelog_cache.setdefault(rev_info["change"], {})
+            file_cache = change_cache[depot_path] = {}
+            # Most filelog information also comes via describe, but integrationAction is unique
+            file_cache["rev"] = rev_info["rev"]
+            file_cache["action"] = rev_info["action"]
+            file_cache["integrationActions"] = [
+                    dict(how=x["how"], file=x["file"], srev=x["srev"], erev=x["erev"])
+                        for x in P4DictUnflattener(rev_info, "how")
+                    ]
+
+    def file_revision_filelog(self, change, depot_path):
+        # We might already have information on this file
+        try: return self.client_filelog_cache[change][depot_path]
+        except: pass
+        # We haven't run filelog on this file yet, so do so and try again
+        self.update_client_filelog_cache(depot_path)
+        return self.client_filelog_cache[change][depot_path]
 
 
 def extractSettingsGitLog(log):
@@ -1678,22 +1749,19 @@ class P4Sync(Command):
 
     def extractFilesFromCommit(self, commit):
         files = []
-        fnum = 0
-        while commit.has_key("depotFile%s" % fnum):
-            path =  commit["depotFile%s" % fnum]
+        for fileInfo in P4DictUnflattener(commit, "depotFile"):
+            path = fileInfo["depotFile"]
 
             # only consider files that have a path in the client
             if not self.repo0.map_in_client(path):
-                fnum = fnum + 1
                 continue
 
             file = {}
             file["path"] = path
-            file["rev"] = commit["rev%s" % fnum]
-            file["action"] = commit["action%s" % fnum]
-            file["type"] = commit["type%s" % fnum]
+            file["rev"] = fileInfo["rev"]
+            file["action"] = fileInfo["action"]
+            file["type"] = fileInfo["type"]
             files.append(file)
-            fnum = fnum + 1
         return files
 
     # output one file from the P4 stream
@@ -1811,15 +1879,14 @@ class P4Sync(Command):
 
         self.stream_have_file_info = True
 
-    def streamP4Files(self, files):
+    def streamP4Files(self, details, files):
         """Stream directly from "p4 files" into "p4 edit", etc"""
-        filesForCommit = []
         filesToRead = []
         filesToDelete = []
 
         for f in files:
-            print f['action'], f['path'], f['rev']
-            filesForCommit.append(f)
+            print f['action'], f['path'], f['rev'], f['type']
+            self.repo0.file_revision_filelog(details["change"], f["path"])
             if f['action'] in self.delete_actions:
                 filesToDelete.append(f)
             else:
@@ -1884,7 +1951,7 @@ class P4Sync(Command):
 
         if self.verbose:
             print "commit change %s" % details["change"]
-        self.streamP4Files(files)
+        self.streamP4Files(details, files)
 
         raise NotImplementedError( "TODO create the changelist and submit" )
 
