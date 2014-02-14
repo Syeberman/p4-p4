@@ -391,6 +391,27 @@ class P4Repo:
     def move(self, src, dest):
         self.system(["move", "-k", wildcard_encode(src), wildcard_encode(dest)])
 
+    def advance_change_counter(self, value):
+        """This command is dangerous and requires admin access."""
+        current = int(self.read_pipe(["counter", "change"]).strip())
+        if current > value: raise ValueError("I refuse to decrease the change counter (%d) to %d" % (current, value))
+        if current == value: return
+        self.read_pipe(["counter", "-f", "change", str(value)])
+
+    def change_out(self, change="default"):
+        cmd = ["change", "-o"]
+        if change != "default": cmd.append(str(change))
+        result = self.cmdList(cmd)
+        if len(result) != 1:
+            die('Output from "change" is %d lines, expecting 1' % len(result))
+        return result[0]
+
+    def submit(self, description, change="default"):
+        """description must be in the format as returned by change_out.  Returns the """
+        cmd = ["submit", "-i", "-f", "submitunchanged"]
+        if change != "default": cmd.extend(["-c", str(change)])
+        return self.cmdList(cmd, stdin=marshal.dumps(description))
+
     def describe(self, change):
         """Make sure it returns a valid result by checking for
         the presence of field "time".  Return a dict of the
@@ -1959,6 +1980,17 @@ class P4Sync(Command):
             print "commit change %s" % details["change"]
         self.streamP4Files(details, files)
 
+        # All the files are now sitting open in the default changelist.  To ensure the next
+        # submitted change is given the number details["change"], we must advance the counter to
+        # details["change"]-1.
+        self.repo1.advance_change_counter(int(details["change"])-1)
+        description = self.repo1.change_out()
+        description["Description"] = details["desc"]
+        submit_result = self.repo1.submit(description)
+        submit_change = submit_result[-1]["submittedChange"]
+        if submit_change != details["change"]:
+            die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
+        
         raise NotImplementedError( "TODO create the changelist and submit" )
 
     # Import p4 labels as git tags. A direct mapping does not
@@ -2077,21 +2109,17 @@ class P4Sync(Command):
     def importChanges(self, changes):
         cnt = 1
         for change in changes:
-            description = self.repo0.describe(change)
-            self.updateOptionDict(description)
+            details = self.repo0.describe(change)
+            self.updateOptionDict(details)
 
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
-                #sys.stdout.write("%s\n" % (" ".join( description["desc"].split( ) ))[:78] )
+                #sys.stdout.write("%s\n" % (" ".join( details["desc"].split( ) ))[:78] )
                 sys.stdout.flush()
             cnt = cnt + 1
 
-            try:
-                files = self.extractFilesFromCommit(description)
-                self.commitChange(description, files)
-            except IOError:
-                print self.gitError.read()
-                sys.exit(1)
+            files = self.extractFilesFromCommit(details)
+            self.commitChange(details, files)
 
     def importHeadRevision(self, revision):
         raise NotImplementedError( "Adapt to Perforce" )
