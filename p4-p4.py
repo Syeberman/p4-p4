@@ -678,10 +678,6 @@ class P4Repo:
 
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
-        # Mapping of change number to file name to file revision details
-        if not hasattr(self, "client_filelog_cache"):
-            self.client_filelog_cache = {}
-
         # "filelog -1s" to get exact contributory integration history of the given path
         # TODO If we could do this in a fast-ish batch command for all files mapped to the client,
         # then we could remove the need for --changesfile
@@ -701,11 +697,26 @@ class P4Repo:
                     ]
 
     def file_revision_filelog(self, change, depot_path):
+        # Caching filelog commands in individual files is problematic because the cached filename
+        # would have to be based somehow on the depot filename.  So, just keep one large cache.
+        if not hasattr(self, "client_filelog_cache"):
+            self.client_filelog_cache_path = os.path.join(self.cacheDir, "client-filelog-1s.py.marshal")
+            if os.path.exists(self.client_filelog_cache_path):
+                with open(self.client_filelog_cache_path, "rb") as infile:
+                    self.client_filelog_cache = marshal.load(infile)
+            else:
+                try: os.makedirs(os.path.dirname(self.client_filelog_cache_path))
+                except OSError: pass
+                self.client_filelog_cache = {}
+
         # We might already have information on this file
         try: return self.client_filelog_cache[change][depot_path]
         except: pass
-        # We haven't run filelog on this file yet, so do so and try again
+
+        # We haven't run filelog on this file yet, so do so, update the cache, and try again
         self.update_client_filelog_cache(depot_path)
+        with open(self.client_filelog_cache_path, "wb") as outfile:
+            marshal.dump(self.client_filelog_cache, outfile)
         return self.client_filelog_cache[change][depot_path]
 
 
