@@ -254,7 +254,8 @@ class P4Repo:
         # Check that the client settings appear correct, then create the client cache if needed.
         # Perforce sets clientName to *unknown* if the client doesn't exist.
         unknown = "*unknown*"
-        if self.info.get("clientName", unknown) == unknown:
+        self.clientName = self.info.get("clientName", unknown)
+        if self.clientName == unknown:
             die("unknown client for %r"% clientRoot)
         server_cr = os.path.normcase(os.path.normpath(self.info["clientRoot"]))
         given_cr = os.path.normcase(os.path.normpath(clientRoot))
@@ -368,18 +369,18 @@ class P4Repo:
     def sync(self, f, *options):
         self.system(["sync"] + list(options) + [wildcard_encode(f)])
 
-    def add(self, f):
+    def add(self, f, filetype):
+        cmd = ["add", "-t", filetype, "-I"]
         # forcibly add file names with wildcards
-        if wildcard_present(f):
-            self.system(["add", "-f", f])
-        else:
-            self.system(["add", f])
+        if wildcard_present(f): cmd.append("-f")
+        cmd.append(f)
+        self.system(cmd)
 
     def delete(self, f):
         self.system(["delete", wildcard_encode(f)])
 
-    def edit(self, f):
-        self.system(["edit", wildcard_encode(f)])
+    def edit(self, f, filetype):
+        self.system(["edit", "-t", filetype, wildcard_encode(f)])
 
     def revert(self, f):
         self.system(["revert", wildcard_encode(f)])
@@ -651,8 +652,7 @@ class P4Repo:
 
         # cache results of "p4 fstat" to lookup client file locations
         self.client_spec_path_cache = {}
-        client_name = self.info["clientName"]
-        client_prefix = "//%s/" % client_name
+        client_prefix = "//%s/" % self.clientName
 
         # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
         # are mapped in this client view (-Rc)
@@ -670,7 +670,7 @@ class P4Repo:
             self.client_spec_path_cache[res['depotFile']] = \
                     self._convert_client_path(client_prefix, res["clientFile"])
 
-    def map_in_client(self, depot_path):
+    def map_to_relative_path(self, depot_path):
         """Return the relative location in the client where this
            depot file should live.  Returns "" if the file should
            not be mapped in the client."""
@@ -1731,8 +1731,7 @@ class View(object):
 
 
 class P4Sync(Command):
-    delete_actions = ( "delete", "move/delete", "purge" )
-
+    
     def __init__(self):
         Command.__init__(self)
         self.options = [
@@ -1762,13 +1761,13 @@ class P4Sync(Command):
         files = []
         for fileInfo in P4DictUnflattener(commit, "depotFile"):
             path = fileInfo["depotFile"]
-
             # only consider files that have a path in the client
-            if not self.repo0.map_in_client(path):
-                continue
+            relPath = self.repo0.map_to_relative_path(path)
+            if not relPath: continue
 
             file = {}
             file["path"] = path
+            file["repo1Path"] = "//%s/%s" % (self.repo1.clientName, relPath)
             file["rev"] = fileInfo["rev"]
             file["action"] = fileInfo["action"]
             file["type"] = fileInfo["type"]
@@ -1778,7 +1777,7 @@ class P4Sync(Command):
     # output one file from the P4 stream
     # - helper for streamP4Files
     def streamOneP4File(self, file, contents):
-        relPath = self.repo0.map_in_client(file['depotFile'])
+        relPath = self.repo0.map_to_relative_path(file['depotFile'])
         assert relPath, "expected path in client"
         if verbose:
             sys.stderr.write("%s\n" % relPath)
@@ -1848,13 +1847,6 @@ class P4Sync(Command):
         with open(hostPath, "wb") as outfile:
             for d in contents: outfile.write(d)
 
-    def streamOneP4Deletion(self, file):
-        raise NotImplementedError( "Adapt to Perforce" )
-        relPath = self.stripRepoPath(file['path'], self.branchPrefixes)
-        if verbose:
-            sys.stderr.write("delete %s\n" % relPath)
-        self.gitStream.write("D %s\n" % relPath)
-
     # handle another chunk of streaming data
     def streamP4FilesCb(self, marshalled):
         # catch p4 errors and complain
@@ -1893,19 +1885,22 @@ class P4Sync(Command):
     def streamP4Files(self, details, files):
         """Stream directly from "p4 files" into "p4 edit", etc"""
         filesToRead = []
-        filesToDelete = []
 
+        # We run the commands through Perforce first, even though the files may not exist on the
+        # client
         for f in files:
             print f['action'], f['path'], f['rev'], f['type']
-            self.repo0.file_revision_filelog(details["change"], f["path"])
-            if f['action'] in self.delete_actions:
-                filesToDelete.append(f)
-            else:
+            #self.repo0.file_revision_filelog(details["change"], f["path"])
+            if f['action'] == "add":
+                self.repo1.add(f['repo1Path'], f['type'])
                 filesToRead.append(f)
-
-        # deleted files...
-        for f in filesToDelete:
-            self.streamOneP4Deletion(f)
+            elif f['action'] == "edit":
+                self.repo1.edit(f['repo1Path'], f['type'])
+                filesToRead.append(f)
+            elif f['action'] == "delete":
+                self.repo1.delete(f['repo1Path'])
+            else:
+                raise ValueError("unknown Perforce action %r" % f['action'])
 
         if len(filesToRead) > 0:
             self.stream_file = {}
