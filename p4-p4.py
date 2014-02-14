@@ -407,10 +407,18 @@ class P4Repo:
         return result[0]
 
     def submit(self, description, change="default"):
-        """description must be in the format as returned by change_out.  Returns the """
+        """description must be in the format as returned by change_out.  Returns the result of 
+        "submit".
+        """
         cmd = ["submit", "-i", "-f", "submitunchanged"]
         if change != "default": cmd.extend(["-c", str(change)])
         return self.cmdList(cmd, stdin=marshal.dumps(description))
+
+    def change_in(self, description):
+        """Changes a pending or submitted change; requires admin access.  Returns the result of 
+        "change".  The changelist is taken from description["Change"].
+        """
+        return self.cmdList(["change", "-i", "-f"], stdin=marshal.dumps(description))
 
     def describe(self, change):
         """Make sure it returns a valid result by checking for
@@ -1864,7 +1872,8 @@ class P4Sync(Command):
         try: os.makedirs(os.path.dirname(hostPath))
         except: pass
 
-        # FIXME import original filetype
+        # FIXME don't turn off read-only attribute...it might save us from mistakes
+        os.chmod(hostPath, stat.S_IWRITE)
         with open(hostPath, "wb") as outfile:
             for d in contents: outfile.write(d)
 
@@ -1972,26 +1981,41 @@ class P4Sync(Command):
         gitStream.write("\n")
 
     def commitChange(self, details, files):
-        epoch = details["time"]
-        author = details["user"]
-        # TODO ensure the author is registered in repo1
-
         if self.verbose:
             print "commit change %s" % details["change"]
         self.streamP4Files(details, files)
 
-        # All the files are now sitting open in the default changelist.  To ensure the next
-        # submitted change is given the number details["change"], we must advance the counter to
-        # details["change"]-1.
-        self.repo1.advance_change_counter(int(details["change"])-1)
+        raise NotImplementedError( "TODO create the changelist and submit" )
+
+        # To ensure the next submitted change is given the number details["change"], we must 
+        # advance the counter to details["change"]-1.
+        self.repo1.advance_change_counter(int(details["change"])-1)    
+
+        # All the files are now sitting open in the default changelist.  Submitting is a two-step
+        # process, because we can't change the user, client, or date with "submit".
         description = self.repo1.change_out()
-        description["Description"] = details["desc"]
+        description["Description"] = "<placeholder>"
         submit_result = self.repo1.submit(description)
         submit_change = submit_result[-1]["submittedChange"]
         if submit_change != details["change"]:
             die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
         
-        raise NotImplementedError( "TODO create the changelist and submit" )
+        pprint.pprint(self.repo1.change_out(submit_change))
+        # Now we can update the fields that only admins can modify
+        description = dict(
+                Change = submit_change,
+                Client = details["client"],
+                Date = '2014/02/14 15:28:33', #details["time"], # time is the epoch, Date is string...will it work?
+                Description = details["desc"],
+                Status = "submitted",
+                Type = "public",
+                User = details["user"],
+                )
+        pprint.pprint(description)
+        change_result = self.repo1.change_in(description)
+        pprint.pprint(change_result)
+        if "p4ExitCode" in change_result[-1]: 
+            die("".join(x.get("data", "") for x in change_result))
 
     # Import p4 labels as git tags. A direct mapping does not
     # exist, so assume that if all the files are at the same revision
@@ -2148,7 +2172,6 @@ class P4Sync(Command):
             if 'p4ExitCode' in info:
                 sys.stderr.write("p4 exitcode: %s\n" % info['p4ExitCode'])
                 sys.exit(1)
-
 
             change = int(info["change"])
             if change > newestRevision:
