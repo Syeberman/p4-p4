@@ -705,6 +705,7 @@ class P4Repo:
         if len(filelog_result) != 1:
             die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
         filelog_info = filelog_result[0]
+        pprint.pprint(filelog_info) # FIXME remove
         for rev_info in P4DictUnflattener(filelog_info, "rev"):
             change_cache = self.client_filelog_cache.setdefault(rev_info["change"], {})
             file_cache = change_cache[depot_path] = {}
@@ -1910,18 +1911,27 @@ class P4Sync(Command):
         # We run the commands through Perforce first, even though the files may not exist on the
         # client
         for f in files:
+            # FIXME remove
             print f['action'], f['path'], f['rev'], f['type']
-            #self.repo0.file_revision_filelog(details["change"], f["path"])
-            if f['action'] == "add":
-                self.repo1.add(f['repo1Path'], f['type'])
+            # FIXME any action may have integration history
+            # FIXME with only srev and erev, will need a map for file->rev->cl
+            f_action = f['action'] 
+            f_log = self.repo0.file_revision_filelog(details["change"], f["path"])
+            pprint.pprint(f_log)
+            if f_action in ("add", "branch"):
+                if f_log["integrationActions"]:
+                    die("support integrations")
+                else: f_action = "add" # source file(s) may have been obliterated, protected, etc
+                if f_action == "add":
+                    self.repo1.add(f['repo1Path'], f['type'])
                 filesToRead.append(f)
-            elif f['action'] == "edit":
+            elif f_action == "edit":
                 self.repo1.edit(f['repo1Path'], f['type'])
                 filesToRead.append(f)
-            elif f['action'] == "delete":
+            elif f_action == "delete":
                 self.repo1.delete(f['repo1Path'])
             else:
-                raise ValueError("unknown Perforce action %r" % f['action'])
+                raise ValueError("unknown Perforce action %r" % f_action)
 
         if len(filesToRead) > 0:
             self.stream_file = {}
@@ -1930,6 +1940,7 @@ class P4Sync(Command):
 
             fileArgs = ['%s#%s' % (f['path'], f['rev']) for f in filesToRead]
 
+            # FIXME convert to sync, which I assume will be faster
             self.repo0.cmdList(["-x", "-", "print"],
                       stdin=fileArgs,
                       cb=self.streamP4FilesCb)
