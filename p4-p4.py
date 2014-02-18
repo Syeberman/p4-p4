@@ -428,14 +428,12 @@ class P4Repo:
         # Change descriptions don't often change, so cache them
         cache_name = os.path.join("describe", str(change))
         ds = self.cmdList(["describe", "-s", str(change)], cache_name=cache_name)
+        if "p4ExitCode" in ds[-1]: 
+            die("".join(x.get("data", "") for x in ds))
         if len(ds) != 1:
             die("p4 describe -s %d did not return 1 result: %s" % (change, str(ds)))
 
         d = ds[0]
-
-        if "p4ExitCode" in d:
-            die("p4 describe -s %d exited with %d: %s" % (change, d["p4ExitCode"],
-                                                        str(d)))
         if "code" in d:
             if d["code"] == "error":
                 die("p4 describe -s %d returned error code: %s" % (change, str(d)))
@@ -553,13 +551,6 @@ class P4Repo:
                 marshal.dump(result, outfile)
 
         return result
-
-    def cmd(self, cmd):
-        list = self.cmdList(cmd)
-        result = {}
-        for entry in list:
-            result.update(entry)
-        return result;
 
     def where(self, depotPath):
         if not depotPath.endswith("/"):
@@ -2000,9 +1991,14 @@ class P4Sync(Command):
         submit_change = submit_result[-1]["submittedChange"]
         if submit_change != details["change"]:
             die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
-    
+
         # Now we can update the fields that only admins can modify
-        description = self.repo1.change_out(submit_change)
+        self.adjustUserDateDesc(details)
+
+    def adjustUserDateDesc(self, details):
+        """Updates the repo1 copy of the change with details from repo0.  Perforce limits this to
+        Date, Description, and User."""
+        description = self.repo1.change_out(details["change"])
         description.update(
                 Date = details["time"],
                 Description = details["desc"],
@@ -2076,11 +2072,6 @@ class P4Sync(Command):
                 # ignore will need to be removed manually.
                 system(["git", "config", "--add", "git-p4.ignoredP4Labels", name])
 
-    def updateOptionDict(self, d):
-        # TODO remove
-        option_keys = {}
-        d["options"] = ' '.join(sorted(option_keys.keys()))
-
     def gitRefForBranch(self, branch):
         raise NotImplementedError( "Adapt to Perforce" )
         if branch == "main":
@@ -2126,19 +2117,32 @@ class P4Sync(Command):
         return ""
 
     def importChanges(self, changes):
+        # Recover from aborted imports
+        self.repo1.revert("//...")
+        changes_m1 = self.repo1.cmdList("changes -m 1")
+        if "p4ExitCode" in changes_m1[-1]: 
+            die("".join(x.get("data", "") for x in changes_m1))
+        lastCommitted = int(changes_m1[0]["change"])
+        
         cnt = 1
         for change in changes:
-            details = self.repo0.describe(change)
-            self.updateOptionDict(details)
-
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
                 if self.verbose: sys.stdout.write("\n")
                 sys.stdout.flush()
             cnt = cnt + 1
 
-            files = self.extractFilesFromCommit(details)
-            self.commitChange(details, files)
+            if change < lastCommitted:
+                pass
+            elif change == lastCommitted:
+                # The previous abort may not have adjusted the user/date/etc
+                details = self.repo0.describe(change)
+                self.adjustUserDateDesc(details)
+            else:
+                details = self.repo0.describe(change)
+                files = self.extractFilesFromCommit(details)
+                self.commitChange(details, files)
+                lastCommitted = change
 
     def importHeadRevision(self, revision):
         raise NotImplementedError( "Adapt to Perforce" )
