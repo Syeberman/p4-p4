@@ -1,6 +1,8 @@
 
 - Ensure both clients have the "unix" LineEndings setting
 
+- Migrate client names for submitted changes (currently all set to one client)
+
 - How does client/server timezone affect the time that's stored in Perforce?
 
 - Keep track of hashes of file revisions, and do "p4 copy" from those files as appropriate

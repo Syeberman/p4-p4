@@ -29,7 +29,7 @@
 import sys
 if sys.hexversion < 0x02040000:
     # The limiter is the subprocess module
-    sys.stderr.write("git-p4: requires Python 2.4 or later.\n")
+    sys.stderr.write("p4-p4: requires Python 2.4 or later.\n")
     sys.exit(1)
 import os
 import optparse
@@ -1871,9 +1871,9 @@ class P4Sync(Command):
 
         try: os.makedirs(os.path.dirname(hostPath))
         except: pass
-
         # FIXME don't turn off read-only attribute...it might save us from mistakes
-        os.chmod(hostPath, stat.S_IWRITE)
+        try: os.chmod(hostPath, stat.S_IWRITE)
+        except: pass
         with open(hostPath, "wb") as outfile:
             for d in contents: outfile.write(d)
 
@@ -1985,8 +1985,6 @@ class P4Sync(Command):
             print "commit change %s" % details["change"]
         self.streamP4Files(details, files)
 
-        raise NotImplementedError( "TODO create the changelist and submit" )
-
         # To ensure the next submitted change is given the number details["change"], we must 
         # advance the counter to details["change"]-1.
         self.repo1.advance_change_counter(int(details["change"])-1)    
@@ -2003,23 +2001,16 @@ class P4Sync(Command):
         if submit_change != details["change"]:
             die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
     
-        pprint.pprint(self.repo1.change_out(submit_change))
-
         # Now we can update the fields that only admins can modify
         description = self.repo1.change_out(submit_change)
-        pprint.pprint(description)
         description.update(
                 Date = details["time"],
                 Description = details["desc"],
                 User = details["user"],
                 )
-        pprint.pprint(description)
         change_result = self.repo1.change_in(description)
-        pprint.pprint(change_result)
         if "p4ExitCode" in change_result[-1]: 
             die("".join(x.get("data", "") for x in change_result))
-
-        raise NotImplementedError( "TODO create the changelist and submit" )
 
     # Import p4 labels as git tags. A direct mapping does not
     # exist, so assume that if all the files are at the same revision
@@ -2142,7 +2133,7 @@ class P4Sync(Command):
 
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
-                #sys.stdout.write("%s\n" % (" ".join( details["desc"].split( ) ))[:78] )
+                if self.verbose: sys.stdout.write("\n")
                 sys.stdout.flush()
             cnt = cnt + 1
 
