@@ -418,7 +418,7 @@ class P4Repo:
         """Changes a pending or submitted change; requires admin access.  Returns the result of 
         "change".  The changelist is taken from description["Change"].
         """
-        return self.cmdList(["change", "-i", "-f"], stdin=marshal.dumps(description))
+        return self.cmdList(["change", "-f", "-i"], stdin=marshal.dumps(description))
 
     def describe(self, change):
         """Make sure it returns a valid result by checking for
@@ -1993,22 +1993,24 @@ class P4Sync(Command):
 
         # All the files are now sitting open in the default changelist.  Submitting is a two-step
         # process, because we can't change the user, client, or date with "submit".
+        # TODO Need to use the correct client here...or forgo client replication
         description = self.repo1.change_out()
         description["Description"] = "<placeholder>"
         submit_result = self.repo1.submit(description)
+        if "p4ExitCode" in submit_result[-1]: 
+            die("".join(x.get("data", "") for x in submit_result))
         submit_change = submit_result[-1]["submittedChange"]
         if submit_change != details["change"]:
             die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
-        
+    
         pprint.pprint(self.repo1.change_out(submit_change))
+
         # Now we can update the fields that only admins can modify
-        description = dict(
-                Change = submit_change,
-                Client = details["client"],
-                Date = '2014/02/14 15:28:33', #details["time"], # time is the epoch, Date is string...will it work?
+        description = self.repo1.change_out(submit_change)
+        pprint.pprint(description)
+        description.update(
+                Date = details["time"],
                 Description = details["desc"],
-                Status = "submitted",
-                Type = "public",
                 User = details["user"],
                 )
         pprint.pprint(description)
@@ -2016,6 +2018,8 @@ class P4Sync(Command):
         pprint.pprint(change_result)
         if "p4ExitCode" in change_result[-1]: 
             die("".join(x.get("data", "") for x in change_result))
+
+        raise NotImplementedError( "TODO create the changelist and submit" )
 
     # Import p4 labels as git tags. A direct mapping does not
     # exist, so assume that if all the files are at the same revision
