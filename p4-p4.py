@@ -1984,7 +1984,7 @@ class P4Sync(Command):
         # process, because we can't change the user, client, or date with "submit".
         # TODO Need to use the correct client here...or forgo client replication
         description = self.repo1.change_out()
-        description["Description"] = "<placeholder>"
+        description["Description"] = "<p4-p4.py placeholder>"
         submit_result = self.repo1.submit(description)
         if "p4ExitCode" in submit_result[-1]: 
             die("".join(x.get("data", "") for x in submit_result))
@@ -2001,7 +2001,8 @@ class P4Sync(Command):
         description = self.repo1.change_out(details["change"])
         description.update(
                 Date = details["time"],
-                Description = details["desc"],
+                # Empty descriptions appear as "" on output, but "" is rejected on input
+                Description = details["desc"] if details["desc"] else "\n",
                 User = details["user"],
                 )
         change_result = self.repo1.change_in(description)
