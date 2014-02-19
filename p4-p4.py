@@ -696,6 +696,37 @@ class P4Repo:
            not be mapped in the client."""
         return self.client_spec_path_cache.get(depot_path, "")
 
+    def update_revision_to_change_cache(self):
+        """Caching (file, revision) to change number that introduced the revision."""
+        if hasattr(self, "revision_to_change_cache"): return
+        self.revision_to_change_cache = {}
+
+        # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
+        # in the client view (-Rc)
+        fstat_result = self.cmdList(
+                ["fstat", "-T", "depotFile headRev headChange", "-Of", "-Rc", "//..."], 
+                cache_name="client-rev-to-change")
+        for res in fstat_result:
+            if "code" in res and res["code"] == "error":
+                # assume error is "... file(s) not in client view"
+                continue
+            if "depotFile" not in res:
+                die("No depotFile in 'p4 fstat' output")
+            if "unmap" in res:
+                # it will list all of them, but only one not unmap-ped
+                continue
+            file_cache = self.revision_to_change_cache.get(res["depotFile"])
+            if file_cache is None:
+                # Perforce gives us the top revision first
+                file_cache = [None, ] * int(res["headRev"])
+                self.revision_to_change_cache[res["depotFile"]] = file_cache
+            file_cache[int(res["headRev"])-1] = int(res["headChange"])
+    
+    def map_revision_to_change(self, depot_path, rev):
+        """Returns None if the file or revision is unknown (might be outside of client)."""
+        try: return self.revision_to_change_cache[depot_path][rev-1]
+        except KeyError, IndexError: return None
+
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
         # "filelog -1s" to get exact contributory integration history of the given path
@@ -1795,6 +1826,24 @@ class P4Sync(Command):
             files.append(file)
         return files
 
+    def replayIntegration(self, file, integLog):
+        """Returns True if the integration specified by integLog was successfully replayed."""
+        relSource = self.repo0.map_to_relative_path(integLog["file"])
+        source = "//%s/%s" % (self.repo1.clientName, relSource)
+        if integLog["srev"] == "#none":
+            start = "#none"
+        else:
+            assert integLog["srev"][0] == "#"
+            start = "@%s" % self.repo0.map_revision_to_change(
+                    integLog["file"], int(integLog["srev"][-1:]))
+        assert integLog["erev"][0] == "#"
+        end = "@%s" % self.repo0.map_revision_to_change(
+                integLog["file"], int(integLog["erev"][-1:]))
+        dest = file["repo1Path"]
+
+        print dest, integLog["how"], source, start, end
+        die("TODO")
+
     def replayIntegrations(self, change, file):
         """Replays the integrations for a particular file in a particular change.  Returns the
         effective action the calling code should apply to the file:
@@ -1803,7 +1852,6 @@ class P4Sync(Command):
             add, edit: mark for add/edit and write the exact repo0 file to the repo1 client
             delete: mark for delete
         """
-        # FIXME with only srev and erev, will need a map for file->rev->cl
         fileLog = self.repo0.file_revision_filelog(change, file["path"])
         pprint.pprint(fileLog)
 
@@ -1813,7 +1861,8 @@ class P4Sync(Command):
         fileOpened = False
 
         for integLog in fileLog["integrationActions"]:
-            die("create this code")
+            if self.replayIntegration(file, integLog):
+                fileOpened = True
 
         # Return the "effective action" that the calling code should apply
         if fileOpened:
@@ -2255,6 +2304,7 @@ class P4Sync(Command):
         self.repo0 = P4Repo(self.repo0_clientRoot)
         self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
+        self.repo0.update_revision_to_change_cache()
 
         # TODO A mandatory option is a contradiction in terms
         if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
