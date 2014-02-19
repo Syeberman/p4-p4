@@ -725,7 +725,7 @@ class P4Repo:
     def map_revision_to_change(self, depot_path, rev):
         """Returns None if the file or revision is unknown (might be outside of client)."""
         try: return self.revision_to_change_cache[depot_path][rev-1]
-        except KeyError, IndexError: return None
+        except KeyError, IndexError: raise # TODO return None?
 
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
@@ -1830,6 +1830,7 @@ class P4Sync(Command):
         """Returns True if the integration specified by integLog was successfully replayed."""
         relSource = self.repo0.map_to_relative_path(integLog["file"])
         source = "//%s/%s" % (self.repo1.clientName, relSource)
+        # TODO Handle map_revision_to_change returning None
         if integLog["srev"] == "#none":
             start = "#none"
         else:
@@ -1841,8 +1842,33 @@ class P4Sync(Command):
                 integLog["file"], int(integLog["erev"][-1:]))
         dest = file["repo1Path"]
 
-        print dest, integLog["how"], source, start, end
-        die("TODO")
+        # TODO use -f on all integrations?  What about -D flags on delete/add?
+        self.repo1.system(["integrate", "-f", "-Dt", "-Ds", "%s%s,%s" % (source, start, end),
+                dest])
+
+        resolveCmd = ["resolve", ]
+        if integLog["how"] in ("branch from", "copy from", "add from"):
+            resolveCmd += ["-at", ]
+        elif integLog["how"] == "moved from":
+            die("How to handle 'moved from'?")
+        elif integLog["how"] == "merge from":
+            # Force-accept the merge, even if conflicts; streamOneP4File will fix the file
+            resolveCmd += ["-af", ]
+        elif integLog["how"] == "ignored":
+            resolveCmd += ["-ay", ]
+        elif integLog["how"] == "delete from":
+            # "p4 integrate" should have taken care of this completely
+            resolveCmd = None
+        elif integLog["how"] == "edit from":
+            die("How to handle 'edit from'?")
+        else:
+            die("Unknown integration action %r" % integLog["how"])
+
+        if resolveCmd is not None:
+            resolveCmd += [dest, ]
+            self.repo1.system(resolveCmd)
+
+        return True
 
     def replayIntegrations(self, change, file):
         """Replays the integrations for a particular file in a particular change.  Returns the
@@ -1865,6 +1891,7 @@ class P4Sync(Command):
                 fileOpened = True
 
         # Return the "effective action" that the calling code should apply
+        # TODO Should ensure the filetype, if it was a factor in the resolve, is updated too
         if fileOpened:
             if file["action"] == "delete": return "integrate/delete"
             return file["action"]
@@ -2066,6 +2093,8 @@ class P4Sync(Command):
         if self.verbose:
             print "commit change %s" % details["change"]
         self.streamP4Files(details, files)
+
+        die("Don't submit just yet")
 
         # To ensure the next submitted change is given the number details["change"], we must 
         # advance the counter to details["change"]-1.
