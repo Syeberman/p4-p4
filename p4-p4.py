@@ -1795,6 +1795,40 @@ class P4Sync(Command):
             files.append(file)
         return files
 
+    def replayIntegrations(self, change, file):
+        """Replays the integrations for a particular file in a particular change.  Returns the
+        effective action the calling code should apply to the file:
+            branch, integrate: write the exact repo0 file to the repo1 client
+            integrate/delete: no further action
+            add, edit: mark for add/edit and write the exact repo0 file to the repo1 client
+            delete: mark for delete
+        """
+        # FIXME with only srev and erev, will need a map for file->rev->cl
+        fileLog = self.repo0.file_revision_filelog(change, file["path"])
+        pprint.pprint(fileLog)
+
+        # There may not be any integrationActions, or we may not be able to replay any of the ones
+        # that _are_ there (ie if all sources weren't migrated to repo1).  In those cases, the
+        # calling code needs to use add/edit/delete.
+        fileOpened = False
+
+        for integLog in fileLog["integrationActions"]:
+            die("create this code")
+
+        # Return the "effective action" that the calling code should apply
+        if fileOpened:
+            if file["action"] == "delete": return "integrate/delete"
+            return file["action"]
+        else:
+            if file["action"] in ("branch", "add"):
+                return "add"
+            elif file["action"] in ("integrate", "edit"):
+                return "edit"
+            elif file["action"] == "delete":
+                return "delete"
+            else:
+                die("Unexpected action %r" % file["action"])
+
     # output one file from the P4 stream
     # - helper for streamP4Files
     def streamOneP4File(self, file, contents):
@@ -1910,26 +1944,23 @@ class P4Sync(Command):
 
         # We run the commands through Perforce first, even though the files may not exist on the
         # client
-        for f in files:
+        for file in files:
             # FIXME remove
-            print f['action'], f['path'], f['rev'], f['type']
-            # FIXME any action may have integration history
-            # FIXME with only srev and erev, will need a map for file->rev->cl
-            f_action = f['action'] 
-            f_log = self.repo0.file_revision_filelog(details["change"], f["path"])
-            pprint.pprint(f_log)
-            if f_action in ("add", "branch"):
-                if f_log["integrationActions"]:
-                    die("support integrations")
-                else: f_action = "add" # source file(s) may have been obliterated, protected, etc
-                if f_action == "add":
-                    self.repo1.add(f['repo1Path'], f['type'])
-                filesToRead.append(f)
+            print file['action'], file['path'], file['rev'], file['type']
+            f_action = self.replayIntegrations(details["change"], file)
+            if f_action == "add":
+                self.repo1.add(file['repo1Path'], file['type'])
+                filesToRead.append(file)
             elif f_action == "edit":
-                self.repo1.edit(f['repo1Path'], f['type'])
-                filesToRead.append(f)
+                self.repo1.edit(file['repo1Path'], file['type'])
+                filesToRead.append(file)
             elif f_action == "delete":
-                self.repo1.delete(f['repo1Path'])
+                self.repo1.delete(file['repo1Path'])
+            elif f_action in ("branch", "integrate"):
+                # marked for branch/integrate by replayIntegrations
+                filesToRead.append(file) 
+            elif f_action == "integrate/delete":
+                pass # marked for delete by replayIntegrations
             else:
                 raise ValueError("unknown Perforce action %r" % f_action)
 
