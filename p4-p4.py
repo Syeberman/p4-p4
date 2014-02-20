@@ -1839,15 +1839,16 @@ class P4Sync(Command):
             srev = int(integLog["srev"][-1:])
             schange = self.repo0.map_revision_to_change(integLog["file"], srev)
             if schange is None: return False # source file not in client, can't replay integration
-            start = "@" + schange
+            start = "@%s" % schange
         assert integLog["erev"][0] == "#"
         erev = int(integLog["erev"][-1:])
         echange = self.repo0.map_revision_to_change(integLog["file"], erev)
         assert echange is not None
-        end = "@" + echange
+        end = "@%s" % echange
         dest = file["repo1Path"]
 
         # TODO use -f on all integrations?  What about -D flags on delete/add?
+        # FIXME catch "no such file(s)"
         self.repo1.system(["integrate", "-f", "-Dt", "-Ds", "%s%s,%s" % (source, start, end),
                 dest])
 
@@ -1869,6 +1870,7 @@ class P4Sync(Command):
         else:
             die("Unknown integration action %r" % integLog["how"])
 
+        # FIXME catch "no file(s) to resolve"
         if resolveCmd is not None:
             resolveCmd += [dest, ]
             self.repo1.system(resolveCmd)
@@ -1896,6 +1898,7 @@ class P4Sync(Command):
 
         # Return the "effective action" that the calling code should apply
         # TODO Should ensure the filetype, if it was a factor in the resolve, is updated too
+        # FIXME verify fileOpened against "p4 opened"
         if fileOpened:
             if file["action"] == "delete": return "integrate/delete"
             return file["action"]
@@ -2097,8 +2100,6 @@ class P4Sync(Command):
         if self.verbose:
             print "commit change %s" % details["change"]
         self.streamP4Files(details, files)
-
-        die("Don't submit just yet")
 
         # To ensure the next submitted change is given the number details["change"], we must 
         # advance the counter to details["change"]-1.
