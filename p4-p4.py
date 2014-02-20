@@ -723,9 +723,11 @@ class P4Repo:
             file_cache[int(res["headRev"])-1] = int(res["headChange"])
     
     def map_revision_to_change(self, depot_path, rev):
-        """Returns None if the file or revision is unknown (might be outside of client)."""
-        try: return self.revision_to_change_cache[depot_path][rev-1]
-        except KeyError, IndexError: raise # TODO return None?
+        """Returns None if the file is unknown (might be outside of client).  Raises an error
+        if the revision is unknown."""
+        file_cache = self.revision_to_change_cache.get(depot_path, None)
+        if file_cache is None: return None
+        return file_cache[rev-1]
 
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
@@ -736,7 +738,6 @@ class P4Repo:
         if len(filelog_result) != 1:
             die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
         filelog_info = filelog_result[0]
-        pprint.pprint(filelog_info) # FIXME remove
         for rev_info in P4DictUnflattener(filelog_info, "rev"):
             change_cache = self.client_filelog_cache.setdefault(rev_info["change"], {})
             file_cache = change_cache[depot_path] = {}
@@ -1835,11 +1836,15 @@ class P4Sync(Command):
             start = "#none"
         else:
             assert integLog["srev"][0] == "#"
-            start = "@%s" % self.repo0.map_revision_to_change(
-                    integLog["file"], int(integLog["srev"][-1:]))
+            srev = int(integLog["srev"][-1:])
+            schange = self.repo0.map_revision_to_change(integLog["file"], srev)
+            if schange is None: return False # source file not in client, can't replay integration
+            start = "@" + schange
         assert integLog["erev"][0] == "#"
-        end = "@%s" % self.repo0.map_revision_to_change(
-                integLog["file"], int(integLog["erev"][-1:]))
+        erev = int(integLog["erev"][-1:])
+        echange = self.repo0.map_revision_to_change(integLog["file"], erev)
+        assert echange is not None
+        end = "@" + echange
         dest = file["repo1Path"]
 
         # TODO use -f on all integrations?  What about -D flags on delete/add?
@@ -1879,7 +1884,6 @@ class P4Sync(Command):
             delete: mark for delete
         """
         fileLog = self.repo0.file_revision_filelog(change, file["path"])
-        pprint.pprint(fileLog)
 
         # There may not be any integrationActions, or we may not be able to replay any of the ones
         # that _are_ there (ie if all sources weren't migrated to repo1).  In those cases, the
