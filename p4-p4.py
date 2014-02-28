@@ -697,9 +697,11 @@ class P4Repo:
         return self.client_spec_path_cache.get(depot_path, "")
 
     def update_revision_to_change_cache(self):
-        """Caching (file, revision) to change number that introduced the revision."""
+        """Caching (file, revision) to change number that introduced the revision.  Also caches
+        a sorted list of changelist numbers."""
         if hasattr(self, "revision_to_change_cache"): return
         self.revision_to_change_cache = {}
+        changes = set()
 
         # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
         # in the client view (-Rc)
@@ -721,6 +723,9 @@ class P4Repo:
                 file_cache = [None, ] * int(res["headRev"])
                 self.revision_to_change_cache[res["depotFile"]] = file_cache
             file_cache[int(res["headRev"])-1] = int(res["headChange"])
+            changes.add(int(res["headChange"]))
+        
+        self.changes = sorted(changes)
     
     def map_revision_to_change(self, depot_path, rev):
         """Returns None if the file is unknown (might be outside of client).  Raises an error
@@ -732,8 +737,6 @@ class P4Repo:
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
         # "filelog -1s" to get exact contributory integration history of the given path
-        # TODO If we could do this in a fast-ish batch command for all files mapped to the client,
-        # then we could remove the need for --changesfile
         filelog_result = self.cmdList(["filelog", "-1s", depot_path])
         if len(filelog_result) != 1:
             die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
@@ -1788,7 +1791,6 @@ class P4Sync(Command):
     def __init__(self):
         Command.__init__(self)
         self.options = [
-                optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
                 optparse.make_option("--max-changes", dest="maxChanges"),
@@ -1805,7 +1807,6 @@ class P4Sync(Command):
         self.repo0 = None
         self.createdBranches = set()
         self.importLabels = False
-        self.changesFile = ""
         self.maxChanges = ""
         self.repo0_clientRoot = False
         self.repo1_clientRoot = False
@@ -1829,6 +1830,10 @@ class P4Sync(Command):
 
     def replayIntegration(self, file, integLog):
         """Returns True if the integration specified by integLog was successfully replayed."""
+        # FIXME Disabling "replay integrations" support in the default branch for now (see
+        # the replay-integrations branch where that work will continue)
+        return False
+
         relSource = self.repo0.map_to_relative_path(integLog["file"])
         source = "//%s/%s" % (self.repo1.clientName, relSource)
         # TODO Handle map_revision_to_change returning None
@@ -2360,41 +2365,17 @@ class P4Sync(Command):
             if not self.silent:
                 print "Performing incremental import"
 
-        revision = ""
-
-        # TODO Make sure no revision specifiers are used when --changesfile
-        # is specified.
-        if not self.changesFile:
-            # import the entire p4 tree, as per the clientspec, at the head revision
-            # TODO specify a revision
-            revision = "#head"
-
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
-        if revision:
+        # TODO Support migrating just the state of repo0 at a given changelist, and not all the
+        # history that led up to it
+        if False:
             self.importHeadRevision(revision)
         else:
-            changes = []
-
-            if len(self.changesFile) > 0:
-                output = open(self.changesFile).readlines()
-                changeSet = set()
-                for line in output:
-                    changeSet.add(int(line))
-
-                for change in changeSet:
-                    changes.append(change)
-
-                changes.sort()
-            else:
-                raise NotImplementedError( "TODO A better way to get list of changes" )
-                if self.verbose:
-                    print "Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
-                                                              self.changeRange)
-                changes = p4ChangesForPaths(self.depotPaths, self.changeRange)
-
-                if len(self.maxChanges) > 0:
-                    changes = changes[:min(int(self.maxChanges), len(changes))]
+            # TODO Instead of all changes up to #head, supply an upper-bound
+            changes = list(self.repo0.changes)
+            if self.maxChanges:
+                del changes[int(self.maxChanges):]
 
             if len(changes) == 0:
                 if not self.silent:
