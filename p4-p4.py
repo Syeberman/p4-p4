@@ -673,6 +673,9 @@ class P4Repo:
 
         # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
         # are mapped in this client view (-Rc)
+        # TODO I think this is pretty fast...we could use it to compare agains the version cached
+        # to disk and, if it or our max changelist is different, delete all the client-dependent
+        # caches.
         fstat_result = self.cmdList(["fstat", "-T", "depotFile clientFile", "-Op", "-Rc", "//..."],
                 cache_name="client-fstat-where")
         for res in fstat_result:
@@ -695,11 +698,10 @@ class P4Repo:
 
     def update_revision_to_change_cache(self):
         """Caching (file, revision) to change number that introduced the revision.  Also caches
-        a dictionary of change numbers to affected files in describe_cache (which is then further
-        modified by update_describe_cache to includes descriptions, etc)."""
+        a list of change numbers affecting files on the client."""
         if hasattr(self, "revision_to_change_cache"): return
         self.revision_to_change_cache = {}
-        self.describe_cache = {}
+        changes = set()
 
         # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
         # in the client view (-Rc)
@@ -708,16 +710,7 @@ class P4Repo:
                     "-Of", "-Rc", "//..."], 
                 cache_name="client-rev-to-change")
         for res in fstat_result:
-            if "code" in res and res["code"] == "error":
-                # assume error is "... file(s) not in client view"
-                continue
-            if "depotFile" not in res:
-                die("No depotFile in 'p4 fstat' output")
-            if "unmap" in res:
-                # it will list all of them, but only one not unmap-ped
-                continue
-
-            # First update revision_to_change_cache
+            if res.get("code") == "error": die(res["data"].strip())
             res_change = int(res["headChange"])
             res_rev = int(res["headRev"])
             res_depotFile = res["depotFile"]
@@ -727,14 +720,10 @@ class P4Repo:
                 file_cache = [None, ] * res_rev
                 self.revision_to_change_cache[res_depotFile] = file_cache
             file_cache[res_rev-1] = res_change
+            changes.add(res_change)
 
-            # Now update describe_cache
-            desc_change_cache = self.describe_cache.setdefault(res_change, {})
-            desc_files_cache = desc_change_cache.setdefault("Files", [])
-            desc_files_cache.append(dict(
-                depotFile=res_depotFile, rev=res_rev, action=res["headAction"], type=["headType"],
-                ))
-   
+        self.change_number_cache = sorted(changes)
+
     def map_revision_to_change(self, depot_path, rev):
         """Returns None if the file is unknown (might be outside of client).  Raises an error
         if the revision is unknown."""
@@ -742,38 +731,9 @@ class P4Repo:
         if file_cache is None: return None
         return file_cache[rev-1]
 
-    def update_describe_cache(self):
-        """Caching information we need about changes, such as description, time, user, file 
-        actions, etc."""
-        if hasattr(self, "describe_cache_updated"): return
-        self.describe_cache_updated = True
-        # Ensure we only list those changelists that actually change the files in our client
-        self.update_revision_to_change_cache()
-
-        # Get the list of submitted changes (-s) with complete descriptions (-l) including time
-        # (-t) for this client
-        changes_result = self.cmdList(
-                ["changes", "-s", "submitted", "-l", "-t", "//%s/..."%self.clientName],
-                cache_name="client-changes")
-        assert len(changes_result) == len(self.describe_cache), "changes reported a different number of changes than fstat did"
-        for change in changes_result:
-            if change.get("code") == "error": die(change["data"].strip())
-            change_num = int(change["change"])
-            desc_change_cache = self.describe_cache.get(change_num)
-            assert desc_change_cache is not None, "changes reported a change (%d) that fstat did not" % change_num
-            desc_change_cache.update(
-                    change=change_num, time=int(change["time"]), desc=change["desc"], 
-                    user=change["user"], client=change["client"],
-                    )
-
-    def cached_describe(self, change):
-        """Fakes information provided via "p4 describe" using the "p4 fstat" and "p4 changes"
-        commands, which can be run in a batch (unlike describe)."""
-        return self.describe_cache[change]
-
     def client_changes(self):
         """Returns an iterable of all change numbers affecting files on this client."""
-        return self.describe_cache.keys()
+        return self.change_number_cache
 
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
@@ -1856,7 +1816,7 @@ class P4Sync(Command):
 
     def extractFilesFromCommit(self, commit):
         files = []
-        for fileInfo in commit["Files"]:
+        for fileInfo in P4DictUnflattener(commit, "depotFile"):
             path = fileInfo["depotFile"]
             # only consider files that have a path in the client
             relPath = self.repo0.map_to_relative_path(path)
@@ -2170,8 +2130,6 @@ class P4Sync(Command):
         # Now we can update the fields that only admins can modify
         self.adjustUserDateDesc(details)
 
-        die("Stop and check output")
-
     def adjustUserDateDesc(self, details):
         """Updates the repo1 copy of the change with details from repo0.  Perforce limits this to
         Date, Description, and User."""
@@ -2321,7 +2279,8 @@ class P4Sync(Command):
                 details = self.repo0.describe(change)
                 self.adjustUserDateDesc(details)
             else:
-                details = self.repo0.cached_describe(change)
+                details = self.repo0.describe(change)
+                assert "desc" in details, "missing description for change %d" % change
                 files = self.extractFilesFromCommit(details)
                 self.commitChange(details, files)
                 lastCommitted = change
@@ -2394,7 +2353,6 @@ class P4Sync(Command):
         #self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
         self.repo0.update_revision_to_change_cache()
-        self.repo0.update_describe_cache()
 
         # TODO A mandatory option is a contradiction in terms
         if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
