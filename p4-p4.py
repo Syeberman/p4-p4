@@ -732,8 +732,7 @@ class P4Repo:
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
         # "filelog -1s" to get exact contributory integration history of the given path
-        # TODO If we could do this in a fast-ish batch command for all files mapped to the client,
-        # then we could remove the need for --changesfile
+        # FIXME can do this in one batch using the client syntax and "sync -qk"
         filelog_result = self.cmdList(["filelog", "-1s", depot_path])
         if len(filelog_result) != 1:
             die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
@@ -1788,6 +1787,7 @@ class P4Sync(Command):
     def __init__(self):
         Command.__init__(self)
         self.options = [
+                # FIXME with update_revision_to_change_cache, we don't need changesfile
                 optparse.make_option("--changesfile", dest="changesFile"),
                 optparse.make_option("--silent", dest="silent", action="store_true"),
                 optparse.make_option("--import-labels", dest="importLabels", action="store_true"),
