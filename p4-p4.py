@@ -695,15 +695,17 @@ class P4Repo:
 
     def update_revision_to_change_cache(self):
         """Caching (file, revision) to change number that introduced the revision.  Also caches
-        a sorted list of changelist numbers."""
+        a dictionary of change numbers to affected files in describe_cache (which is then further
+        modified by update_describe_cache to includes descriptions, etc)."""
         if hasattr(self, "revision_to_change_cache"): return
         self.revision_to_change_cache = {}
-        changes = set()
+        self.describe_cache = {}
 
         # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
         # in the client view (-Rc)
         fstat_result = self.cmdList(
-                ["fstat", "-T", "depotFile headRev headChange", "-Of", "-Rc", "//..."], 
+                ["fstat", "-T", "depotFile headRev headChange headAction headType", 
+                    "-Of", "-Rc", "//..."], 
                 cache_name="client-rev-to-change")
         for res in fstat_result:
             if "code" in res and res["code"] == "error":
@@ -714,22 +716,64 @@ class P4Repo:
             if "unmap" in res:
                 # it will list all of them, but only one not unmap-ped
                 continue
-            file_cache = self.revision_to_change_cache.get(res["depotFile"])
+
+            # First update revision_to_change_cache
+            res_change = int(res["headChange"])
+            res_rev = int(res["headRev"])
+            res_depotFile = res["depotFile"]
+            file_cache = self.revision_to_change_cache.get(res_depotFile)
             if file_cache is None:
                 # Perforce gives us the top revision first
-                file_cache = [None, ] * int(res["headRev"])
-                self.revision_to_change_cache[res["depotFile"]] = file_cache
-            file_cache[int(res["headRev"])-1] = int(res["headChange"])
-            changes.add(int(res["headChange"]))
-        
-        self.changes = sorted(changes)
-    
+                file_cache = [None, ] * res_rev
+                self.revision_to_change_cache[res_depotFile] = file_cache
+            file_cache[res_rev-1] = res_change
+
+            # Now update describe_cache
+            desc_change_cache = self.describe_cache.setdefault(res_change, {})
+            desc_files_cache = desc_change_cache.setdefault("Files", [])
+            desc_files_cache.append(dict(
+                depotFile=res_depotFile, rev=res_rev, action=res["headAction"], type=["headType"],
+                ))
+   
     def map_revision_to_change(self, depot_path, rev):
         """Returns None if the file is unknown (might be outside of client).  Raises an error
         if the revision is unknown."""
         file_cache = self.revision_to_change_cache.get(depot_path, None)
         if file_cache is None: return None
         return file_cache[rev-1]
+
+    def update_describe_cache(self):
+        """Caching information we need about changes, such as description, time, user, file 
+        actions, etc."""
+        if hasattr(self, "describe_cache_updated"): return
+        self.describe_cache_updated = True
+        # Ensure we only list those changelists that actually change the files in our client
+        self.update_revision_to_change_cache()
+
+        # Get the list of submitted changes (-s) with complete descriptions (-l) including time
+        # (-t) for this client
+        changes_result = self.cmdList(
+                ["changes", "-s", "submitted", "-l", "-t", "//%s/..."%self.clientName],
+                cache_name="client-changes")
+        assert len(changes_result) == len(self.describe_cache), "changes reported a different number of changes than fstat did"
+        for change in changes_result:
+            if change.get("code") == "error": die(change["data"].strip())
+            change_num = int(change["change"])
+            desc_change_cache = self.describe_cache.get(change_num)
+            assert desc_change_cache is not None, "changes reported a change (%d) that fstat did not" % change_num
+            desc_change_cache.update(
+                    change=change_num, time=int(change["time"]), desc=change["desc"], 
+                    user=change["user"], client=change["client"],
+                    )
+
+    def cached_describe(self, change):
+        """Fakes information provided via "p4 describe" using the "p4 fstat" and "p4 changes"
+        commands, which can be run in a batch (unlike describe)."""
+        return self.describe_cache[change]
+
+    def client_changes(self):
+        """Returns an iterable of all change numbers affecting files on this client."""
+        return self.describe_cache.keys()
 
     def update_client_filelog_cache(self, depot_path):
         """Update the cache with contributory file history of the given file."""
@@ -752,6 +796,8 @@ class P4Repo:
     def file_revision_filelog(self, change, depot_path):
         # Caching filelog commands in individual files is problematic because the cached filename
         # would have to be based somehow on the depot filename.  So, just keep one large cache.
+        # FIXME if we first do a "p4 sync -qk", we can do a client-wide filelog, but we need
+        # to ensure our client has no open files and can be used exclusively
         if not hasattr(self, "client_filelog_cache"):
             self.client_filelog_cache_path = os.path.join(self.cacheDir, "client-filelog-1s.py.marshal")
             if os.path.exists(self.client_filelog_cache_path):
@@ -1810,7 +1856,7 @@ class P4Sync(Command):
 
     def extractFilesFromCommit(self, commit):
         files = []
-        for fileInfo in P4DictUnflattener(commit, "depotFile"):
+        for fileInfo in commit["Files"]:
             path = fileInfo["depotFile"]
             # only consider files that have a path in the client
             relPath = self.repo0.map_to_relative_path(path)
@@ -2056,7 +2102,9 @@ class P4Sync(Command):
 
             fileArgs = ['%s#%s' % (f['path'], f['rev']) for f in filesToRead]
 
-            # FIXME convert to sync, which I assume will be faster
+            # FIXME convert to this, which I assume will be faster:
+            #   p4 sync -f -p -q @change,@change
+            # FIXME ...then move (not copy) into repo1, then sync #none on repo1, to reduce disk
             self.repo0.cmdList(["-x", "-", "print"],
                       stdin=fileArgs,
                       cb=self.streamP4FilesCb)
@@ -2121,6 +2169,8 @@ class P4Sync(Command):
 
         # Now we can update the fields that only admins can modify
         self.adjustUserDateDesc(details)
+
+        die("Stop and check output")
 
     def adjustUserDateDesc(self, details):
         """Updates the repo1 copy of the change with details from repo0.  Perforce limits this to
@@ -2257,6 +2307,7 @@ class P4Sync(Command):
         
         cnt = 1
         for change in changes:
+            # TODO Each time through this loop we can sync repo1 to #none to cut down on disk usage
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
                 if self.verbose: sys.stdout.write("\n")
@@ -2270,7 +2321,7 @@ class P4Sync(Command):
                 details = self.repo0.describe(change)
                 self.adjustUserDateDesc(details)
             else:
-                details = self.repo0.describe(change)
+                details = self.repo0.cached_describe(change)
                 files = self.extractFilesFromCommit(details)
                 self.commitChange(details, files)
                 lastCommitted = change
@@ -2343,6 +2394,7 @@ class P4Sync(Command):
         #self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
         self.repo0.update_revision_to_change_cache()
+        self.repo0.update_describe_cache()
 
         # TODO A mandatory option is a contradiction in terms
         if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
@@ -2364,7 +2416,7 @@ class P4Sync(Command):
             self.importHeadRevision(revision)
         else:
             # TODO Instead of all changes up to #head, supply an upper-bound
-            changes = list(self.repo0.changes)
+            changes = sorted(self.repo0.client_changes())
             if self.maxChanges:
                 del changes[int(self.maxChanges):]
 
