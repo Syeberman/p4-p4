@@ -438,6 +438,7 @@ class P4Repo:
         if "time" not in d:
             die("p4 describe -s %d returned no \"time\": %s" % (change, str(d)))
 
+        d.update(change=int(d["change"]), time=int(d["time"]))
         return d
 
     #
@@ -735,47 +736,60 @@ class P4Repo:
         """Returns an iterable of all change numbers affecting files on this client."""
         return self.change_number_cache
 
-    def update_client_filelog_cache(self, depot_path):
+    # All right, follow me here:
+    #   - We only want the history of files mapped by the client, not all files
+    #   - "filelog -1s //client/..." will only report files sync'ed to the client, which excludes
+    #   deleted files
+    #   - No file is deleted at revision 1, so "sync -kq #1" will make the filelog command work
+    #   - BUT! There appears to be a cache between the two commands, so we might get bad data
+    #   - OK, then what about a label?  "labelsync -q -l label #1" is slow (so is #head)
+    #   - Ah, but "sync -kq #1", followed by "labelsync -q l label", isn't that slow
+    #   - CRAP! "filelog -1s @label" only lists revision 1 for each file
+    #   - Whew, "filelog -1s @label,#head" will list all files mapped by the label, from the
+    #   revision in that label (which is #1) to the last (#head), and the files mapped by the label
+    #   are those mapped by the client
+    #   - ...I hope we're done
+    def iter_client_filelog(self):
+        """Returns the filelog for all files in the current clientspec, which is possibly cached
+        to disk."""
+        cache_path = os.path.join(self.cacheDir, "filelog-1s.py.marshal")
+        if not os.path.exists(cache_path):
+            # Create a label containing revision 1 of all files mapped to this client
+            label = self.clientName + "_p4-p4_client_filelog"
+            self.write_pipe("label -i", self.read_pipe("label -o %s"%label))
+            self.system("sync -kq #1")
+            self.system("labelsync -q -l %s"%label)
+
+            # Run filelog; -1 ignores pre-move history, -s considers only contributory files
+            self.system("-G filelog -1 -s @%s,#head > %s" % (label, cache_path))
+
+            # Clean-up
+            self.system("label -d " + label)
+            self.system("sync -kq #none")
+
+        # Now read the file from disk
+        with open(cache_path, "rb") as infile:
+            try: yield marshal.load(infile)
+            except EOFError: return
+
+    def update_client_filelog_cache(self):
         """Update the cache with contributory file history of the given file."""
-        # "filelog -1s" to get exact contributory integration history of the given path
-        filelog_result = self.cmdList(["filelog", "-1s", depot_path])
-        if len(filelog_result) != 1:
-            die('Output from "filelog" is %d lines, expecting 1' % len(filelog_result))
-        filelog_info = filelog_result[0]
-        for rev_info in P4DictUnflattener(filelog_info, "rev"):
-            change_cache = self.client_filelog_cache.setdefault(rev_info["change"], {})
-            file_cache = change_cache[depot_path] = {}
-            # Most filelog information also comes via describe, but integrationAction is unique
-            file_cache["rev"] = rev_info["rev"]
-            file_cache["action"] = rev_info["action"]
-            file_cache["integrationActions"] = [
-                    dict(how=x["how"], file=x["file"], srev=x["srev"], erev=x["erev"])
-                        for x in P4DictUnflattener(rev_info, "how")
-                    ]
+        if hasattr(self, "client_filelog_cache"): return
+        self.client_filelog_cache = {}
+
+        for filelog_info in self.iter_client_filelog():
+            for rev_info in P4DictUnflattener(filelog_info, "rev"):
+                change_cache = self.client_filelog_cache.setdefault(int(rev_info["change"]), {})
+                file_cache = change_cache[filelog_info["depotFile"]] = {}
+                # Most filelog information also comes via describe, but integrationAction is unique
+                file_cache["rev"] = int(rev_info["rev"])
+                file_cache["action"] = rev_info["action"]
+                file_cache["integrationActions"] = [
+                        dict(how=x["how"], file=x["file"], srev=x["srev"], erev=x["erev"])
+                            for x in P4DictUnflattener(rev_info, "how")
+                        ]
 
     def file_revision_filelog(self, change, depot_path):
-        # Caching filelog commands in individual files is problematic because the cached filename
-        # would have to be based somehow on the depot filename.  So, just keep one large cache.
-        # FIXME if we first do a "p4 sync -qk", we can do a client-wide filelog, but we need
-        # to ensure our client has no open files and can be used exclusively
-        if not hasattr(self, "client_filelog_cache"):
-            self.client_filelog_cache_path = os.path.join(self.cacheDir, "client-filelog-1s.py.marshal")
-            if os.path.exists(self.client_filelog_cache_path):
-                with open(self.client_filelog_cache_path, "rb") as infile:
-                    self.client_filelog_cache = marshal.load(infile)
-            else:
-                try: os.makedirs(os.path.dirname(self.client_filelog_cache_path))
-                except OSError: pass
-                self.client_filelog_cache = {}
-
-        # We might already have information on this file
-        try: return self.client_filelog_cache[change][depot_path]
-        except: pass
-
-        # We haven't run filelog on this file yet, so do so, update the cache, and try again
-        self.update_client_filelog_cache(depot_path)
-        with open(self.client_filelog_cache_path, "wb") as outfile:
-            marshal.dump(self.client_filelog_cache, outfile)
         return self.client_filelog_cache[change][depot_path]
 
 
@@ -1802,7 +1816,9 @@ class P4Sync(Command):
         # P4Submit moves individual changes from repo1->repo0.
         self.description = "Imports from one Perforce repo (repo0) into another (repo1).  " \
                 "P4CONFIG files must exist at each client's root to specify connection settings.  " \
-                "Only files mapped by repo0's client spec are imported.  You must have admin " \
+                "Only files mapped by repo0's client spec are imported.  This script assumes " \
+                "repo0's client is created solely for this import and may leave it in an " \
+                "inconsistent state ('p4 sync -k', for one).  You must have admin " \
                 "access to repo1."
 
         self.usage += " <repo0-client-root> <repo1-client-root>"
@@ -2135,7 +2151,7 @@ class P4Sync(Command):
         Date, Description, and User."""
         description = self.repo1.change_out(details["change"])
         description.update(
-                Date = details["time"],
+                Date = str(details["time"]),
                 # Empty descriptions appear as "" on output, but "" is rejected on input
                 Description = details["desc"] if details["desc"] else "\n",
                 User = details["user"],
@@ -2353,6 +2369,7 @@ class P4Sync(Command):
         #self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
         self.repo0.update_revision_to_change_cache()
+        self.repo0.update_client_filelog_cache()
 
         # TODO A mandatory option is a contradiction in terms
         if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
@@ -2363,6 +2380,10 @@ class P4Sync(Command):
         # Sanity checks
         if self.repo0.info["serverAddress"] == self.repo1.info["serverAddress"]:
             die("repo0 and repo1 can't be the same server")
+        if len(self.repo0.cmdList("opened")) > 0:
+            die("You have files opened in repo0! p4-p4.py will use and abuse your repo0 client.")
+        if self.repo0.getClient()["LineEnd"] != "unix":
+            die("repo0's client must have 'LineEnd: unix'")
         if self.repo1.getClient()["LineEnd"] != "unix":
             die("repo1's client must have 'LineEnd: unix'")
 
