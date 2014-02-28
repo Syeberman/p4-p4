@@ -313,6 +313,11 @@ class P4Repo:
         real_cmd = self.build_cmd(c)
         return read_pipe_lines(real_cmd)
 
+    def system(self, cmd):
+        """Specifically invoke p4 as the system command. """
+        real_cmd = self.build_cmd(cmd)
+        system(real_cmd)
+
     def has_command(self, cmd):
         """Ask p4 for help on this command.  If it returns an error, the
         command does not exist in this version of p4."""
@@ -340,14 +345,6 @@ class P4Repo:
             return False
         # assume it failed because @... was invalid changelist
         return True
-
-    def system(self, cmd):
-        """Specifically invoke p4 as the system command. """
-        real_cmd = self.build_cmd(cmd)
-        expand = isinstance(real_cmd, basestring)
-        retcode = subprocess.call(real_cmd, shell=expand)
-        if retcode:
-            raise CalledProcessError(retcode, real_cmd)
 
     def version_string(self):
         """Read the version string, showing just the last line, which
@@ -2251,9 +2248,12 @@ class P4Sync(Command):
         # Recover from aborted imports
         self.repo1.revert("//...")
         changes_m1 = self.repo1.cmdList("changes -m 1")
-        if "p4ExitCode" in changes_m1[-1]: 
-            die("".join(x.get("data", "") for x in changes_m1))
-        lastCommitted = int(changes_m1[0]["change"])
+        if not changes_m1:
+            lastCommitted = 0
+        else:
+            if "p4ExitCode" in changes_m1[-1]: 
+                die("".join(x.get("data", "") for x in changes_m1))
+            lastCommitted = int(changes_m1[0]["change"])
         
         cnt = 1
         for change in changes:
@@ -2335,13 +2335,12 @@ class P4Sync(Command):
     def run(self, args):
         if not len(args) == 2: die("exactly two arguments required")
         self.repo0_clientRoot, self.repo1_clientRoot = args
-        self.changeRange = ""
 
         # TODO A mandatory option is a contradiction in terms
         if not self.repo0_clientRoot: die("Must supply --repo0-client-root")
         if not os.path.exists(self.repo0_clientRoot): die("--repo0-client-root must exist")
         self.repo0 = P4Repo(self.repo0_clientRoot)
-        self.repo0.buildUserMap(cache_name="users")
+        #self.repo0.buildUserMap(cache_name="users")
         self.repo0.update_client_spec_path_cache()
         self.repo0.update_revision_to_change_cache()
 
@@ -2349,21 +2348,13 @@ class P4Sync(Command):
         if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
         if not os.path.exists(self.repo1_clientRoot): die("--repo1-client-root must exist")
         self.repo1 = P4Repo(self.repo1_clientRoot)
-        self.repo1.buildUserMap() # do not cached to disk, because we will change it
+        #self.repo1.buildUserMap() # do not cached to disk, because we will change it
 
         # Sanity checks
         if self.repo0.info["serverAddress"] == self.repo1.info["serverAddress"]:
             die("repo0 and repo1 can't be the same server")
         if self.repo1.getClient()["LineEnd"] != "unix":
             die("repo1's client must have 'LineEnd: unix'")
-
-        # TODO: should always look at previous commits,
-        # merge with previous imports, if possible.
-        p4Change = 0 # FIXME set to last-imported-change + 1
-        if p4Change > 0:
-            self.changeRange = "@%s,#head" % p4Change
-            if not self.silent:
-                print "Performing incremental import"
 
         self.tz = "%+03d%02d" % (- time.timezone / 3600, ((- time.timezone % 3600) / 60))
 
