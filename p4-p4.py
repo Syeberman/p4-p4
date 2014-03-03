@@ -1841,10 +1841,14 @@ class P4Sync(Command):
 
             file = {}
             file["path"] = path
-            file["repo1Path"] = "//%s/%s" % (self.repo1.clientName, relPath)
-            file["rev"] = fileInfo["rev"]
+            file["rev"] = int(fileInfo["rev"])
             file["action"] = fileInfo["action"]
             file["type"] = fileInfo["type"]
+
+            # Additional info
+            file["RelativePath"] = relPath
+            file["Repo1Path"] = "//%s/%s" % (self.repo1.clientName, relPath)
+            
             files.append(file)
         return files
 
@@ -1871,7 +1875,7 @@ class P4Sync(Command):
         echange = self.repo0.map_revision_to_change(integLog["file"], erev)
         assert echange is not None
         end = "@%s" % echange
-        dest = file["repo1Path"]
+        dest = file["Repo1Path"]
 
         # TODO use -f on all integrations?  What about -D flags on delete/add?
         # FIXME catch "no such file(s)"
@@ -2006,7 +2010,6 @@ class P4Sync(Command):
 
         try: os.makedirs(os.path.dirname(hostPath))
         except: pass
-        # FIXME don't turn off read-only attribute...it might save us from mistakes
         try: os.chmod(hostPath, stat.S_IWRITE)
         except: pass
         with open(hostPath, "wb") as outfile:
@@ -2054,17 +2057,17 @@ class P4Sync(Command):
         # We run the commands through Perforce first, even though the files may not exist on the
         # client
         for file in files:
-            # FIXME remove
-            print file['action'], file['path'], file['rev'], file['type']
+            if verbose:
+                print file['action'], file['path'], file['rev'], file['type']
             f_action = self.replayIntegrations(details["change"], file)
             if f_action == "add":
-                self.repo1.add(file['repo1Path'], file['type'])
+                self.repo1.add(file['Repo1Path'], file['type'])
                 filesToRead.append(file)
             elif f_action == "edit":
-                self.repo1.edit(file['repo1Path'], file['type'])
+                self.repo1.edit(file['Repo1Path'], file['type'])
                 filesToRead.append(file)
             elif f_action == "delete":
-                self.repo1.delete(file['repo1Path'])
+                self.repo1.delete(file['Repo1Path'])
             elif f_action in ("branch", "integrate"):
                 # marked for branch/integrate by replayIntegrations
                 filesToRead.append(file) 
@@ -2074,22 +2077,28 @@ class P4Sync(Command):
                 raise ValueError("unknown Perforce action %r" % f_action)
 
         if len(filesToRead) > 0:
-            self.stream_file = {}
-            self.stream_contents = []
-            self.stream_have_file_info = False
+            # This will sync (-f) only those files modified by this change, quietly (-q), and
+            # without bothering to update the server's have table (-p)
+            # XXX It's important that the have table is empty (-f can't be used with -p)
+            syncRevArgs = "@%d,@%d" % (details["change"], details["change"])
+            self.repo0.system(["sync", "-p", "-q", syncRevArgs])
 
-            fileArgs = ['%s#%s' % (f['path'], f['rev']) for f in filesToRead]
+            # FIXME We can't reduce disk usage by syncing to #none on repo1, but maybe we can just
+            # delete the files and let Perforce think they're on the client
+            for file in filesToRead:
+                file_relPath = file["RelativePath"]
+                if verbose: print file_relPath
+                file_repo0HostPath = os.path.join(self.repo0.clientRoot, file_relPath)
+                file_repo1HostPath = os.path.join(self.repo1.clientRoot, file_relPath)
 
-            # FIXME convert to this, which I assume will be faster:
-            #   p4 sync -f -p -q @change,@change
-            # FIXME ...then move (not copy) into repo1, then sync #none on repo1, to reduce disk
-            self.repo0.cmdList(["-x", "-", "print"],
-                      stdin=fileArgs,
-                      cb=self.streamP4FilesCb)
-
-            # do the last chunk
-            if self.stream_file.has_key('depotFile'):
-                self.streamOneP4File(self.stream_file, self.stream_contents)
+                if os.path.exists(file_repo1HostPath):
+                    try: os.chmod(file_repo1HostPath, stat.S_IWRITE)
+                    except: pass
+                    os.remove(file_repo1HostPath)
+                else:
+                    try: os.makedirs(os.path.dirname(file_repo1HostPath))
+                    except: pass
+                os.rename(file_repo0HostPath, file_repo1HostPath)
 
     # Stream a p4 tag
     def streamTag(self, gitStream, labelName, labelDetails, commit, epoch):
@@ -2277,6 +2286,8 @@ class P4Sync(Command):
         return ""
 
     def importChanges(self, changes):
+        # repo0's have table must be empty for "sync-at-change" to work
+        self.repo0.system(["sync", "-f", "-q", "#none"])
         # Recover from aborted imports
         self.repo1.revert("//...")
         changes_m1 = self.repo1.cmdList("changes -m 1")
@@ -2296,7 +2307,6 @@ class P4Sync(Command):
                 self.adjustUserDateDesc(details)
                 continue
 
-            # TODO Each time through this loop we can sync repo1 to #none to cut down on disk usage
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
                 if self.verbose: sys.stdout.write("\n")
