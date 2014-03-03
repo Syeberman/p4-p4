@@ -318,6 +318,16 @@ class P4Repo:
         real_cmd = self.build_cmd(cmd)
         system(real_cmd)
 
+    @classmethod
+    def split_path_revRange(self, path_revRange):
+        """Splits a "file[revRange]" string (ie "foobar@1920,#head") into (path, revRange), either 
+        of which can be the empty string."""
+        splitPoint = len(path_revRange)
+        for char in "#@":
+            try: splitPoint = min(path_revRange.index(char), splitPoint)
+            except ValueError: continue
+        return path_revRange[:splitPoint], path_revRange[splitPoint:]
+
     def has_command(self, cmd):
         """Ask p4 for help on this command.  If it returns an error, the
         command does not exist in this version of p4."""
@@ -609,20 +619,6 @@ class P4Repo:
         self._client = clientOutput[0]
         return self._client
 
-    def getClientView(self):
-        """Look at the p4 client spec, create a View() object that contains
-        all the mappings, and return it."""
-        entry = self.getClient(cache_name="client")
-
-        # hold this new View
-        view = View()
-
-        # append the lines, in order, to the view
-        for elem in P4DictUnflattener(entry, "View"):
-            view.append(elem["View"])
-
-        return view
-
     def userId(self):
         if self.myUserId:
             return self.myUserId
@@ -657,6 +653,14 @@ class P4Repo:
         for (key, val) in self.users.items():
             s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
 
+
+class P4FileInfoCache:
+    """Caches information on the files mapped to the P4Repo's client that match the given revRange.
+    You must call the appropriate update_*_cache methods depending on the information you need."""
+    def __init__(self, repo, revRange):
+        self.repo = repo
+        self.revRange = revRange
+
     def _convert_client_path(self, client_prefix, clientFile):
         # chop off //client/ part to make it relative
         if not clientFile.startswith(client_prefix):
@@ -670,14 +674,15 @@ class P4Repo:
 
         # cache results of "p4 fstat" to lookup client file locations
         self.client_spec_path_cache = {}
-        client_prefix = "//%s/" % self.clientName
+        client_prefix = "//%s/" % self.repo.clientName
 
         # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
         # are mapped in this client view (-Rc)
-        # TODO I think this is pretty fast...we could use it to compare agains the version cached
+        # TODO I think this is pretty fast...we could use it to compare against the version cached
         # to disk and, if it or our max changelist is different, delete all the client-dependent
         # caches.
-        fstat_result = self.cmdList(["fstat", "-T", "depotFile clientFile", "-Op", "-Rc", "//..."],
+        fstat_result = self.repo.cmdList(
+                ["fstat", "-T", "depotFile clientFile", "-Op", "-Rc", "//..."],
                 cache_name="client-fstat-where")
         for res in fstat_result:
             if "code" in res and res["code"] == "error":
@@ -698,6 +703,7 @@ class P4Repo:
         return self.client_spec_path_cache.get(depot_path, "")
 
     def update_revision_to_change_cache(self):
+        # FIXME instead, get this from filelog
         """Caching (file, revision) to change number that introduced the revision.  Also caches
         a list of change numbers affecting files on the client."""
         if hasattr(self, "revision_to_change_cache"): return
@@ -706,7 +712,7 @@ class P4Repo:
 
         # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
         # in the client view (-Rc)
-        fstat_result = self.cmdList(
+        fstat_result = self.repo.cmdList(
                 ["fstat", "-T", "depotFile headRev headChange headAction headType", 
                     "-Of", "-Rc", "//..."], 
                 cache_name="client-rev-to-change")
@@ -749,23 +755,27 @@ class P4Repo:
     #   revision in that label (which is #1) to the last (#head), and the files mapped by the label
     #   are those mapped by the client
     #   - ...I hope we're done
+    # FIXME Running "p4 files -m 1" after updating the label should flush the cache
+    # FIXME We need to keep doing this sync hack even if using a label, to ensure we limit to the
+    # client view
     def iter_client_filelog(self):
         """Returns the filelog for all files in the current clientspec, which is possibly cached
         to disk."""
-        cache_path = os.path.join(self.cacheDir, "filelog-1s.py.marshal")
+        # FIXME delete cache if 
+        cache_path = os.path.join(self.repo.cacheDir, "filelog-1s.py.marshal")
         if not os.path.exists(cache_path):
             # Create a label containing revision 1 of all files mapped to this client
-            label = self.clientName + "_p4-p4_client_filelog"
-            self.write_pipe("label -i", self.read_pipe("label -o %s"%label))
-            self.system("sync -kq #1")
-            self.system("labelsync -q -l %s"%label)
+            label = self.repo.clientName + "_p4-p4_client_filelog"
+            self.repo.write_pipe("label -i", self.repo.read_pipe("label -o %s"%label))
+            self.repo.system("sync -kq #1")
+            self.repo.system("labelsync -q -l %s"%label)
 
             # Run filelog; -1 ignores pre-move history, -s considers only contributory files
-            self.system("-G filelog -1 -s @%s,#head > %s" % (label, cache_path))
+            self.repo.system("-G filelog -1 -s @%s,#head > %s" % (label, cache_path))
 
             # Clean-up
-            self.system("label -d " + label)
-            self.system("sync -kq #none")
+            self.repo.system("label -d " + label)
+            self.repo.system("sync -kq #none")
 
         # Now read the file from disk
         with open(cache_path, "rb") as infile:
@@ -1820,23 +1830,24 @@ class P4Sync(Command):
                 "Only files mapped by repo0's client spec are imported.  This script assumes " \
                 "repo0's client is created solely for this import and may leave it in an " \
                 "inconsistent state ('p4 sync -k', for one).  You must have admin " \
-                "access to repo1."
+                "access to repo1.\n\n" \
+                "The optional rev-range is an in Perforce.  If you have a large client View and " \
+                "the import is taking far longer than expected, you might be better moving that " \
+                "View to a label (specified via ref-range) and simplifying the client View."
 
-        self.usage += " <repo0-client-root> <repo1-client-root>"
+        self.usage += " <repo0-client-root>[rev-range] <repo1-client-root>"
         self.silent = False
         self.repo0 = None
         self.createdBranches = set()
         self.importLabels = False
         self.maxChanges = ""
-        self.repo0_clientRoot = False
-        self.repo1_clientRoot = False
 
     def extractFilesFromCommit(self, commit):
         files = []
         for fileInfo in P4DictUnflattener(commit, "depotFile"):
             path = fileInfo["depotFile"]
             # only consider files that have a path in the client
-            relPath = self.repo0.map_to_relative_path(path)
+            relPath = self.fileLogs.map_to_relative_path(path)
             if not relPath: continue
 
             file = {}
@@ -1859,7 +1870,7 @@ class P4Sync(Command):
         return False
         # FIXME Will need for allow for baseless merges
 
-        relSource = self.repo0.map_to_relative_path(integLog["file"])
+        relSource = self.fileLogs.map_to_relative_path(integLog["file"])
         source = "//%s/%s" % (self.repo1.clientName, relSource)
         # TODO Handle map_revision_to_change returning None
         if integLog["srev"] == "#none":
@@ -1867,12 +1878,12 @@ class P4Sync(Command):
         else:
             assert integLog["srev"][0] == "#"
             srev = int(integLog["srev"][-1:])
-            schange = self.repo0.map_revision_to_change(integLog["file"], srev)
+            schange = self.fileLogs.map_revision_to_change(integLog["file"], srev)
             if schange is None: return False # source file not in client, can't replay integration
             start = "@%s" % schange
         assert integLog["erev"][0] == "#"
         erev = int(integLog["erev"][-1:])
-        echange = self.repo0.map_revision_to_change(integLog["file"], erev)
+        echange = self.fileLogs.map_revision_to_change(integLog["file"], erev)
         assert echange is not None
         end = "@%s" % echange
         dest = file["Repo1Path"]
@@ -1915,7 +1926,7 @@ class P4Sync(Command):
             add, edit: mark for add/edit and write the exact repo0 file to the repo1 client
             delete: mark for delete
         """
-        fileLog = self.repo0.file_revision_filelog(change, file["path"])
+        fileLog = self.fileLogs.file_revision_filelog(change, file["path"])
 
         # There may not be any integrationActions, or we may not be able to replay any of the ones
         # that _are_ there (ie if all sources weren't migrated to repo1).  In those cases, the
@@ -1945,7 +1956,7 @@ class P4Sync(Command):
     # output one file from the P4 stream
     # - helper for streamP4Files
     def streamOneP4File(self, file, contents):
-        relPath = self.repo0.map_to_relative_path(file['depotFile'])
+        relPath = self.fileLogs.map_to_relative_path(file['depotFile'])
         assert relPath, "expected path in client"
         if verbose:
             sys.stderr.write("%s\n" % relPath)
@@ -2077,28 +2088,22 @@ class P4Sync(Command):
                 raise ValueError("unknown Perforce action %r" % f_action)
 
         if len(filesToRead) > 0:
-            # This will sync (-f) only those files modified by this change, quietly (-q), and
-            # without bothering to update the server's have table (-p)
-            # XXX It's important that the have table is empty (-f can't be used with -p)
-            syncRevArgs = "@%d,@%d" % (details["change"], details["change"])
-            self.repo0.system(["sync", "-p", "-q", syncRevArgs])
+            self.stream_file = {}
+            self.stream_contents = []
+            self.stream_have_file_info = False
 
-            # FIXME We can't reduce disk usage by syncing to #none on repo1, but maybe we can just
-            # delete the files and let Perforce think they're on the client
-            for file in filesToRead:
-                file_relPath = file["RelativePath"]
-                if verbose: print file_relPath
-                file_repo0HostPath = os.path.join(self.repo0.clientRoot, file_relPath)
-                file_repo1HostPath = os.path.join(self.repo1.clientRoot, file_relPath)
+            fileArgs = ['%s#%s' % (f['path'], f['rev']) for f in filesToRead]
 
-                if os.path.exists(file_repo1HostPath):
-                    try: os.chmod(file_repo1HostPath, stat.S_IWRITE)
-                    except: pass
-                    os.remove(file_repo1HostPath)
-                else:
-                    try: os.makedirs(os.path.dirname(file_repo1HostPath))
-                    except: pass
-                os.rename(file_repo0HostPath, file_repo1HostPath)
+            # FIXME We can't reduce disk usage by syncing to #none on repo1, (Perforce won't let us
+            # edit something not on the client) but maybe we can just delete the files and let 
+            # Perforce think they're on the client
+            self.repo0.cmdList(["-x", "-", "print"],
+                      stdin=fileArgs,
+                      cb=self.streamP4FilesCb)
+
+            # do the last chunk
+            if self.stream_file.has_key('depotFile'):
+                self.streamOneP4File(self.stream_file, self.stream_contents)
 
     # Stream a p4 tag
     def streamTag(self, gitStream, labelName, labelDetails, commit, epoch):
@@ -2377,21 +2382,19 @@ class P4Sync(Command):
 
     def run(self, args):
         if not len(args) == 2: die("exactly two arguments required")
-        self.repo0_clientRoot, self.repo1_clientRoot = args
+        repo0_clientRoot, revRange = P4Repo.split_path_revRange(args[0])
+        repo1_clientRoot = args[1]
 
-        # TODO A mandatory option is a contradiction in terms
-        if not self.repo0_clientRoot: die("Must supply --repo0-client-root")
-        if not os.path.exists(self.repo0_clientRoot): die("--repo0-client-root must exist")
-        self.repo0 = P4Repo(self.repo0_clientRoot)
+        if not os.path.exists(repo0_clientRoot): die("<repo0-client-root> must exist")
+        self.repo0 = P4Repo(repo0_clientRoot)
         #self.repo0.buildUserMap(cache_name="users")
-        self.repo0.update_client_spec_path_cache()
-        self.repo0.update_revision_to_change_cache()
-        self.repo0.update_client_filelog_cache()
+        self.fileLogs = P4FileInfoCache(self.repo0, revRange)
+        self.fileLogs.update_client_spec_path_cache()
+        self.fileLogs.update_revision_to_change_cache()
+        self.fileLogs.update_client_filelog_cache()
 
-        # TODO A mandatory option is a contradiction in terms
-        if not self.repo1_clientRoot: die("Must supply --repo1-client-root")
-        if not os.path.exists(self.repo1_clientRoot): die("--repo1-client-root must exist")
-        self.repo1 = P4Repo(self.repo1_clientRoot)
+        if not os.path.exists(repo1_clientRoot): die("<repo1-client-root> must exist")
+        self.repo1 = P4Repo(repo1_clientRoot)
         #self.repo1.buildUserMap() # do not cached to disk, because we will change it
 
         # Sanity checks
@@ -2412,7 +2415,7 @@ class P4Sync(Command):
             self.importHeadRevision(revision)
         else:
             # TODO Instead of all changes up to #head, supply an upper-bound
-            changes = sorted(self.repo0.client_changes())
+            changes = sorted(self.fileLogs.client_changes())
             if self.maxChanges:
                 del changes[int(self.maxChanges):]
 
