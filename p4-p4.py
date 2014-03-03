@@ -2120,10 +2120,16 @@ class P4Sync(Command):
         # TODO Need to use the correct client here...or forgo client replication
         description = self.repo1.change_out()
         description["Description"] = "<p4-p4.py placeholder>"
-        submit_result = self.repo1.submit(description)
-        if "p4ExitCode" in submit_result[-1]: 
-            die("".join(x.get("data", "") for x in submit_result))
-        submit_change = submit_result[-1]["submittedChange"]
+        submit_results = self.repo1.submit(description)
+        submit_change = None
+        for submit_result in submit_results:
+            if submit_result["code"] == "error" or "p4ExitCode" in submit_result:
+                die("".join(x.get("data", "") for x in submit_results))
+            try: submit_change = submit_result["submittedChange"]
+            except KeyError: pass
+        if submit_change is None:
+            pprint.pprint(submit_results) # FIXME remove
+            die("Couldn't confirm submitted change number")
         if submit_change != details["change"]:
             die("Submitted change %s doesn't equal original (%s)" % (submit_change, details["change"]))
 
@@ -2263,27 +2269,26 @@ class P4Sync(Command):
                 die("".join(x.get("data", "") for x in changes_m1))
             lastCommitted = int(changes_m1[0]["change"])
         
-        cnt = 1
-        for change in changes:
+        for cnt, change in enumerate(changes, 1):
+            if change < lastCommitted:
+                continue
+            elif change == lastCommitted:
+                # The previous abort may not have adjusted the user/date/etc
+                details = self.repo0.describe(change)
+                self.adjustUserDateDesc(details)
+                continue
+
             # TODO Each time through this loop we can sync repo1 to #none to cut down on disk usage
             if not self.silent:
                 sys.stdout.write("\rImporting revision %s (%s%%)" % (change, cnt * 100 / len(changes)))
                 if self.verbose: sys.stdout.write("\n")
                 sys.stdout.flush()
-            cnt = cnt + 1
 
-            if change < lastCommitted:
-                pass
-            elif change == lastCommitted:
-                # The previous abort may not have adjusted the user/date/etc
-                details = self.repo0.describe(change)
-                self.adjustUserDateDesc(details)
-            else:
-                details = self.repo0.describe(change)
-                assert "desc" in details, "missing description for change %d" % change
-                files = self.extractFilesFromCommit(details)
-                self.commitChange(details, files)
-                lastCommitted = change
+            details = self.repo0.describe(change)
+            assert "desc" in details, "missing description for change %d" % change
+            files = self.extractFilesFromCommit(details)
+            self.commitChange(details, files)
+            lastCommitted = change
 
     def importHeadRevision(self, revision):
         raise NotImplementedError( "Adapt to Perforce" )
