@@ -654,12 +654,13 @@ class P4Repo:
             s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
 
 
-class P4FileInfoCache:
+class P4ClientFileLogs:
     """Caches information on the files mapped to the P4Repo's client that match the given revRange.
-    You must call the appropriate update_*_cache methods depending on the information you need."""
+    """
     def __init__(self, repo, revRange):
         self.repo = repo
         self.revRange = revRange
+        self.update_client_filelog_cache()
 
     def _convert_client_path(self, client_prefix, clientFile):
         # chop off //client/ part to make it relative
@@ -668,79 +669,48 @@ class P4FileInfoCache:
                 (client_prefix, clientFile))
         return clientFile[len(client_prefix):]
 
+    class File:
+        def __init__(self, depotFile, relPath, headRev):
+            self.depotFile = depotFile
+            self.relPath = relPath
+            self.changes = [None for x in range(headRev)] # lists changes in order
+    class Integration:
+        def __init__(self, how, file, srev, erev):
+            self.how = how
+            self.file = file
+            self.srev = srev
+            self.erev = erev
+    class Action:
+        def __init__(self, depotFile, rev, action):
+            self.depotFile = depotFile
+            self.rev = rev
+            self.action = action
+            self.integrations = [] # lists Integrations in order
+    class Change:
+        def __init__(self, number):
+            self.number = number
+            self.files = {} # maps depotFile to Action
+
     def update_client_spec_path_cache(self):
-        """ Caching file paths by "p4 fstat" batch query """
-        if hasattr(self, "client_spec_path_cache"): return
+        """Creates and fills files with depotFile and relPath information, and allocates the 
+        revisions list."""
+        self.files = {}
 
-        # cache results of "p4 fstat" to lookup client file locations
-        self.client_spec_path_cache = {}
-        client_prefix = "//%s/" % self.repo.clientName
-
-        # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for all files (//...) that
+        # Get the depotFile->clientFile mapping in Perforce syntax (-Op) for files in revRange that
         # are mapped in this client view (-Rc)
-        # TODO I think this is pretty fast...we could use it to compare against the version cached
-        # to disk and, if it or our max changelist is different, delete all the client-dependent
-        # caches.
         fstat_result = self.repo.cmdList(
-                ["fstat", "-T", "depotFile clientFile", "-Op", "-Rc", "//..."],
+                ["fstat", "-T", "depotFile clientFile headRev", "-Op", "-Rc", 
+                    "//..."+self.revRange],
                 cache_name="client-fstat-where")
-        for res in fstat_result:
-            if "code" in res and res["code"] == "error":
-                # assume error is "... file(s) not in client view"
-                continue
-            if "clientFile" not in res:
-                die("No clientFile in 'p4 fstat' output")
-            if "unmap" in res:
-                # it will list all of them, but only one not unmap-ped
-                continue
-            self.client_spec_path_cache[res['depotFile']] = \
-                    self._convert_client_path(client_prefix, res["clientFile"])
-
-    def map_to_relative_path(self, depot_path):
-        """Return the relative location in the client where this
-           depot file should live.  Returns "" if the file should
-           not be mapped in the client."""
-        return self.client_spec_path_cache.get(depot_path, "")
-
-    def update_revision_to_change_cache(self):
-        # FIXME instead, get this from filelog
-        """Caching (file, revision) to change number that introduced the revision.  Also caches
-        a list of change numbers affecting files on the client."""
-        if hasattr(self, "revision_to_change_cache"): return
-        self.revision_to_change_cache = {}
-        changes = set()
-
-        # Get the rev->change mapping for all revisions (-Of) for all files (//...) that are mapped
-        # in the client view (-Rc)
-        fstat_result = self.repo.cmdList(
-                ["fstat", "-T", "depotFile headRev headChange headAction headType", 
-                    "-Of", "-Rc", "//..."], 
-                cache_name="client-rev-to-change")
+        client_prefix = "//%s/" % self.repo.clientName
         for res in fstat_result:
             if res.get("code") == "error": die(res["data"].strip())
-            res_change = int(res["headChange"])
-            res_rev = int(res["headRev"])
-            res_depotFile = res["depotFile"]
-            file_cache = self.revision_to_change_cache.get(res_depotFile)
-            if file_cache is None:
-                # Perforce gives us the top revision first
-                file_cache = [None, ] * res_rev
-                self.revision_to_change_cache[res_depotFile] = file_cache
-            file_cache[res_rev-1] = res_change
-            changes.add(res_change)
-
-        self.change_number_cache = sorted(changes)
-
-    def map_revision_to_change(self, depot_path, rev):
-        """Returns None if the file is unknown (might be outside of client).  Raises an error
-        if the revision is unknown."""
-        file_cache = self.revision_to_change_cache.get(depot_path, None)
-        if file_cache is None: return None
-        return file_cache[rev-1]
-
-    def client_changes(self):
-        """Returns an iterable of all change numbers affecting files on this client."""
-        return self.change_number_cache
+            file_depotFile = res["depotFile"]
+            self.files[file_depotFile] = P4ClientFileLogs.File(
+                    file_depotFile,
+                    self._convert_client_path(client_prefix, res["clientFile"]),
+                    int(res["headRev"])
+                    )
 
     # All right, follow me here:
     #   - We only want the history of files mapped by the client, not all files
@@ -756,12 +726,10 @@ class P4FileInfoCache:
     #   are those mapped by the client
     #   - ...I hope we're done
     # FIXME Running "p4 files -m 1" after updating the label should flush the cache
-    # FIXME We need to keep doing this sync hack even if using a label, to ensure we limit to the
-    # client view
+    # FIXME Perhaps, instead of all this, it'd be easier just to "-x -" the list in to filelog
     def iter_client_filelog(self):
         """Returns the filelog for all files in the current clientspec, which is possibly cached
         to disk."""
-        # FIXME delete cache if 
         cache_path = os.path.join(self.repo.cacheDir, "filelog-1s.py.marshal")
         if not os.path.exists(cache_path):
             # Create a label containing revision 1 of all files mapped to this client
@@ -784,24 +752,52 @@ class P4FileInfoCache:
                 except EOFError: return
 
     def update_client_filelog_cache(self):
-        """Update the cache with contributory file history for all client files."""
-        if hasattr(self, "client_filelog_cache"): return
-        self.client_filelog_cache = {}
+        """Create and fills changes with Actions and Integrations.  Updates files.changes with
+        the change numbers for each rev."""
+        # Most filelog information also comes via describe, but integrationAction is unique
+        self.update_client_spec_path_cache()
+        self.changes = {}
 
         for filelog_info in self.iter_client_filelog():
+            file = self.files[filelog_info["depotFile"]]
             for rev_info in P4DictUnflattener(filelog_info, "rev"):
-                change_cache = self.client_filelog_cache.setdefault(int(rev_info["change"]), {})
-                file_cache = change_cache[filelog_info["depotFile"]] = {}
-                # Most filelog information also comes via describe, but integrationAction is unique
-                file_cache["rev"] = int(rev_info["rev"])
-                file_cache["action"] = rev_info["action"]
-                file_cache["integrationActions"] = [
-                        dict(how=x["how"], file=x["file"], srev=x["srev"], erev=x["erev"])
+                change_number = int(rev_info["change"])
+                rev = int(rev_info["rev"])
+                try: change = self.changes[change_number]
+                except KeyError: 
+                    change = self.changes[change_number] = P4ClientFileLogs.Change(change_number)
+                action = change.files[file.depotFile] = P4ClientFileLogs.Action(
+                        file.depotFile,
+                        rev,
+                        rev_info["action"]
+                        )
+                action.integrations.extend(
+                        P4ClientFileLogs.Integration(x["how"], x["file"], x["srev"], x["erev"])
                             for x in P4DictUnflattener(rev_info, "how")
-                        ]
+                        )
+                file.changes[rev-1] = change_number
 
-    def file_revision_filelog(self, change, depot_path):
-        return self.client_filelog_cache[change][depot_path]
+    def map_to_relative_path(self, depotFile):
+        """Return the relative location in the client where this
+           depot file should live.  Returns "" if the file should
+           not be mapped in the client."""
+        try: file = self.files[depotFile]
+        except KeyError: return ""
+        return file.relPath
+
+    def map_revision_to_change(self, depotFile, rev):
+        """Returns None if the file is unknown (might be outside of client).  Raises an error
+        if the revision is unknown."""
+        try: file = self.files[depotFile]
+        except KeyError: return None
+        return file.changes[rev-1]
+
+    def client_changes(self):
+        """Returns an iterable of all change numbers affecting files on this client."""
+        return self.changes.keys()
+
+    def file_revision_filelog(self, change, depotFile):
+        return self.changes[change].files[depotFile]
 
 
 def extractSettingsGitLog(log):
@@ -1847,7 +1843,7 @@ class P4Sync(Command):
         for fileInfo in P4DictUnflattener(commit, "depotFile"):
             path = fileInfo["depotFile"]
             # only consider files that have a path in the client
-            relPath = self.fileLogs.map_to_relative_path(path)
+            relPath = self.repo0_log.map_to_relative_path(path)
             if not relPath: continue
 
             file = {}
@@ -1870,20 +1866,20 @@ class P4Sync(Command):
         return False
         # FIXME Will need for allow for baseless merges
 
-        relSource = self.fileLogs.map_to_relative_path(integLog["file"])
+        relSource = self.repo0_log.map_to_relative_path(integLog.file)
         source = "//%s/%s" % (self.repo1.clientName, relSource)
         # TODO Handle map_revision_to_change returning None
-        if integLog["srev"] == "#none":
+        if integLog.srev == "#none":
             start = "#none"
         else:
-            assert integLog["srev"][0] == "#"
-            srev = int(integLog["srev"][-1:])
-            schange = self.fileLogs.map_revision_to_change(integLog["file"], srev)
+            assert integLog.srev[0] == "#"
+            srev = int(integLog.srev[-1:])
+            schange = self.repo0_log.map_revision_to_change(integLog.file, srev)
             if schange is None: return False # source file not in client, can't replay integration
             start = "@%s" % schange
-        assert integLog["erev"][0] == "#"
-        erev = int(integLog["erev"][-1:])
-        echange = self.fileLogs.map_revision_to_change(integLog["file"], erev)
+        assert integLog.erev[0] == "#"
+        erev = int(integLog.erev[-1:])
+        echange = self.repo0_log.map_revision_to_change(integLog.file, erev)
         assert echange is not None
         end = "@%s" % echange
         dest = file["Repo1Path"]
@@ -1894,22 +1890,22 @@ class P4Sync(Command):
                 dest])
 
         resolveCmd = ["resolve", ]
-        if integLog["how"] in ("branch from", "copy from", "add from"):
+        if integLog.how in ("branch from", "copy from", "add from"):
             resolveCmd += ["-at", ]
-        elif integLog["how"] == "moved from":
+        elif integLog.how == "moved from":
             die("How to handle 'moved from'?")
-        elif integLog["how"] == "merge from":
+        elif integLog.how == "merge from":
             # Force-accept the merge, even if conflicts; streamOneP4File will fix the file
             resolveCmd += ["-af", ]
-        elif integLog["how"] == "ignored":
+        elif integLog.how == "ignored":
             resolveCmd += ["-ay", ]
-        elif integLog["how"] == "delete from":
+        elif integLog.how == "delete from":
             # "p4 integrate" should have taken care of this completely
             resolveCmd = None
-        elif integLog["how"] == "edit from":
+        elif integLog.how == "edit from":
             die("How to handle 'edit from'?")
         else:
-            die("Unknown integration action %r" % integLog["how"])
+            die("Unknown integration action %r" % integLog.how)
 
         # FIXME catch "no file(s) to resolve"
         if resolveCmd is not None:
@@ -1926,14 +1922,14 @@ class P4Sync(Command):
             add, edit: mark for add/edit and write the exact repo0 file to the repo1 client
             delete: mark for delete
         """
-        fileLog = self.fileLogs.file_revision_filelog(change, file["path"])
+        fileLog = self.repo0_log.file_revision_filelog(change, file["path"])
 
-        # There may not be any integrationActions, or we may not be able to replay any of the ones
+        # There may not be any integrations, or we may not be able to replay any of the ones
         # that _are_ there (ie if all sources weren't migrated to repo1).  In those cases, the
         # calling code needs to use add/edit/delete.
         fileOpened = False
 
-        for integLog in fileLog["integrationActions"]:
+        for integLog in fileLog.integrations:
             if self.replayIntegration(file, integLog):
                 fileOpened = True
 
@@ -1956,7 +1952,7 @@ class P4Sync(Command):
     # output one file from the P4 stream
     # - helper for streamP4Files
     def streamOneP4File(self, file, contents):
-        relPath = self.fileLogs.map_to_relative_path(file['depotFile'])
+        relPath = self.repo0_log.map_to_relative_path(file['depotFile'])
         assert relPath, "expected path in client"
         if verbose:
             sys.stderr.write("%s\n" % relPath)
@@ -2388,10 +2384,7 @@ class P4Sync(Command):
         if not os.path.exists(repo0_clientRoot): die("<repo0-client-root> must exist")
         self.repo0 = P4Repo(repo0_clientRoot)
         #self.repo0.buildUserMap(cache_name="users")
-        self.fileLogs = P4FileInfoCache(self.repo0, revRange)
-        self.fileLogs.update_client_spec_path_cache()
-        self.fileLogs.update_revision_to_change_cache()
-        self.fileLogs.update_client_filelog_cache()
+        self.repo0_log = P4ClientFileLogs(self.repo0, revRange)
 
         if not os.path.exists(repo1_clientRoot): die("<repo1-client-root> must exist")
         self.repo1 = P4Repo(repo1_clientRoot)
@@ -2415,7 +2408,7 @@ class P4Sync(Command):
             self.importHeadRevision(revision)
         else:
             # TODO Instead of all changes up to #head, supply an upper-bound
-            changes = sorted(self.fileLogs.client_changes())
+            changes = sorted(self.repo0_log.client_changes())
             if self.maxChanges:
                 del changes[int(self.maxChanges):]
 
