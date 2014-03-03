@@ -769,11 +769,12 @@ class P4Repo:
 
         # Now read the file from disk
         with open(cache_path, "rb") as infile:
-            try: yield marshal.load(infile)
-            except EOFError: return
+            while True:
+                try: yield marshal.load(infile)
+                except EOFError: return
 
     def update_client_filelog_cache(self):
-        """Update the cache with contributory file history of the given file."""
+        """Update the cache with contributory file history for all client files."""
         if hasattr(self, "client_filelog_cache"): return
         self.client_filelog_cache = {}
 
@@ -1852,6 +1853,7 @@ class P4Sync(Command):
         # FIXME Disabling "replay integrations" support in the default branch for now (see
         # the replay-integrations branch where that work will continue)
         return False
+        # FIXME Will need for allow for baseless merges
 
         relSource = self.repo0.map_to_relative_path(integLog["file"])
         source = "//%s/%s" % (self.repo1.clientName, relSource)
@@ -2141,7 +2143,7 @@ class P4Sync(Command):
         for submit_result in submit_results:
             if submit_result["code"] == "error" or "p4ExitCode" in submit_result:
                 die("".join(x.get("data", "") for x in submit_results))
-            try: submit_change = submit_result["submittedChange"]
+            try: submit_change = int(submit_result["submittedChange"])
             except KeyError: pass
         if submit_change is None:
             pprint.pprint(submit_results) # FIXME remove
