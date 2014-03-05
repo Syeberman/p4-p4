@@ -1,0 +1,8 @@
+# hg revert backup files
+\.orig$
+
+# Python compiled modules
+\.pyc$
+\.pyo$
+/__pycache__/
+

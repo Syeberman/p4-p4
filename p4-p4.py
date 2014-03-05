@@ -673,6 +673,7 @@ class P4ClientFileLogs:
         def __init__(self, depotFile, relPath, headRev):
             self.depotFile = depotFile
             self.relPath = relPath
+            self.headRev = headRev
             self.changes = [None for x in range(headRev)] # lists changes in order
     class Integration:
         def __init__(self, how, file, srev, erev):
@@ -712,45 +713,6 @@ class P4ClientFileLogs:
                     int(res["headRev"])
                     )
 
-    # All right, follow me here:
-    #   - We only want the history of files mapped by the client, not all files
-    #   - "filelog -1s //client/..." will only report files sync'ed to the client, which excludes
-    #   deleted files
-    #   - No file is deleted at revision 1, so "sync -kq #1" will make the filelog command work
-    #   - BUT! There appears to be a cache between the two commands, so we might get bad data
-    #   - OK, then what about a label?  "labelsync -q -l label #1" is slow (so is #head)
-    #   - Ah, but "sync -kq #1", followed by "labelsync -q l label", isn't that slow
-    #   - CRAP! "filelog -1s @label" only lists revision 1 for each file
-    #   - Whew, "filelog -1s @label,#head" will list all files mapped by the label, from the
-    #   revision in that label (which is #1) to the last (#head), and the files mapped by the label
-    #   are those mapped by the client
-    #   - ...I hope we're done
-    # FIXME Running "p4 files -m 1" after updating the label should flush the cache
-    # FIXME Perhaps, instead of all this, it'd be easier just to "-x -" the list in to filelog
-    def iter_client_filelog(self):
-        """Returns the filelog for all files in the current clientspec, which is possibly cached
-        to disk."""
-        cache_path = os.path.join(self.repo.cacheDir, "filelog-1s.py.marshal")
-        if not os.path.exists(cache_path):
-            # Create a label containing revision 1 of all files mapped to this client
-            label = self.repo.clientName + "_p4-p4_client_filelog"
-            self.repo.write_pipe("label -i", self.repo.read_pipe("label -o %s"%label))
-            self.repo.system("sync -kq #1")
-            self.repo.system("labelsync -q -l %s"%label)
-
-            # Run filelog; -1 ignores pre-move history, -s considers only contributory files
-            self.repo.system("-G filelog -1 -s @%s,#head > %s" % (label, cache_path))
-
-            # Clean-up
-            self.repo.system("label -d " + label)
-            self.repo.system("sync -kq #none")
-
-        # Now read the file from disk
-        with open(cache_path, "rb") as infile:
-            while True:
-                try: yield marshal.load(infile)
-                except EOFError: return
-
     def update_client_filelog_cache(self):
         """Create and fills changes with Actions and Integrations.  Updates files.changes with
         the change numbers for each rev."""
@@ -758,7 +720,14 @@ class P4ClientFileLogs:
         self.update_client_spec_path_cache()
         self.changes = {}
 
-        for filelog_info in self.iter_client_filelog():
+        # Run filelog; -1 ignores pre-move history, -s considers only contributory files
+        filelog_files = ["%s#%d"%(x.depotFile, x.headRev) for x in self.files.values()]
+        filelog_result = self.repo.cmdList(
+                ["-x", "-", "filelog", "-1", "-s"], stdin=filelog_files, 
+                cache_name="client-filelog-1s")
+
+        for filelog_info in filelog_result:
+            if filelog_info.get("code") == "error": die(filelog_info["data"].strip())
             file = self.files[filelog_info["depotFile"]]
             for rev_info in P4DictUnflattener(filelog_info, "rev"):
                 change_number = int(rev_info["change"])
