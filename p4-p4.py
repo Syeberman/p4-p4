@@ -2268,6 +2268,13 @@ class P4Sync(Command):
                 die("".join(x.get("data", "") for x in changes_m1))
             lastCommitted = int(changes_m1[0]["change"])
         
+        # FIXME Via fstat and filelog, we already have a mapping of changes to the modification
+        # details of that change.  All we need from describe is the description/time/user/etc,
+        # which we can also get from changes.  So run changes on one of the files in this change
+        # and grab the descriptions for changes we've yet to commit.  Next change, we may just have
+        # it in memory.  Clear out old descriptions...no sense keeping them in memory when we 
+        # don't use them.  Use revRange,@>=change to limit the output of changes to just future 
+        # changes, even if revRange is a range of changes itself (yup, Perforce allows this).
         for cnt, change in enumerate(changes, 1):
             if change < lastCommitted:
                 continue
