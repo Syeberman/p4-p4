@@ -1909,11 +1909,11 @@ class P4Sync(Command):
             if file["action"] == "delete": return "integrate/delete"
             return file["action"]
         else:
-            if file["action"] in ("branch", "add"):
+            if file["action"] in ("branch", "add", "move/add"):
                 return "add"
             elif file["action"] in ("integrate", "edit"):
                 return "edit"
-            elif file["action"] == "delete":
+            elif file["action"] in ("delete", "move/delete"):
                 return "delete"
             else:
                 die("Unexpected action %r" % file["action"])
@@ -2032,6 +2032,11 @@ class P4Sync(Command):
 
         # We run the commands through Perforce first, even though the files may not exist on the
         # client
+        # FIXME move works on two files at once, so doesn't fit nicely into this current loop:
+        #   - if the source isn't in repo1, it needs to be translated to an add
+        #   - if the destination isn't in repo1, it needs to become a delete
+        #   - otherwise...can we just issue the same move command twice with the second a no-op?
+        #   - ...but if Perforce doesn't allow that, then we need to make sure to operate as a pair
         for file in files:
             if verbose:
                 print file['action'], file['path'], file['rev'], file['type']
@@ -2044,11 +2049,11 @@ class P4Sync(Command):
                 filesToRead.append(file)
             elif f_action == "delete":
                 self.repo1.delete(file['Repo1Path'])
-            elif f_action in ("branch", "integrate"):
-                # marked for branch/integrate by replayIntegrations
+            elif f_action in ("branch", "integrate", "move/add"):
+                # marked for branch/integrate/move by replayIntegrations
                 filesToRead.append(file) 
-            elif f_action == "integrate/delete":
-                pass # marked for delete by replayIntegrations
+            elif f_action in ("integrate/delete", "move/delete"):
+                pass # marked for delete/move by replayIntegrations
             else:
                 raise ValueError("unknown Perforce action %r" % f_action)
 
